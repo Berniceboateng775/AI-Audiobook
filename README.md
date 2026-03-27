@@ -1,20 +1,20 @@
-# 🎭 AI Cinematic Audiobook Engine
+# AI Cinematic Audiobook Engine
 
 > Transform PDF storybooks into dramatic, multi-voice audio performances — like a movie, but audio only.
 
 The engine reads your story, detects characters and emotions, assigns unique male/female voices, and generates a cinematic audiobook with background sounds and emotional acting.
 
-## ✨ Features
+## Features
 
-- 📄 **PDF Extraction** — Upload any storybook in PDF format
-- 💬 **Dialogue Detection** — Automatically separates speech from narration
-- 🧠 **Emotion Analysis** — Detects anger, love, fear, excitement, suspense via Ollama LLM
-- 🎙️ **Multi-Voice TTS** — Different voices for male, female characters and narrator
-- 🎭 **Emotional Acting** — Whispers, shouts, trembling voices based on context
-- 🎶 **Background Sounds** — Cinematic ambient sounds matched to scene mood
-- ⏱️ **Smart Timing** — Dramatic pauses, scene transitions, natural pacing
+- **PDF Extraction** — Upload any storybook in PDF format
+- **Dialogue Detection** — Automatically separates speech from narration
+- **Emotion Analysis** — Detects anger, love, fear, excitement, suspense via Ollama LLM
+- **Multi-Voice TTS** — Different voices for male, female characters and narrator
+- **Emotional Acting** — Whispers, shouts, trembling voices based on context
+- **Background Sounds** — Cinematic ambient sounds matched to scene mood
+- **Smart Timing** — Dramatic pauses, scene transitions, natural pacing
 
-## 🛠️ Tech Stack (100% Free)
+## Tech Stack (100% Free)
 
 | Component | Tool |
 |-----------|------|
@@ -26,13 +26,13 @@ The engine reads your story, detects characters and emotions, assigns unique mal
 | Web API | FastAPI |
 | Frontend | Vanilla HTML/CSS/JS |
 
-## 📋 Prerequisites
+## Prerequisites
 
 - Python 3.10+
 - [Ollama](https://ollama.com) — for local LLM
 - [FFmpeg](https://ffmpeg.org) — for audio processing
 
-## 🚀 Setup
+## Setup
 
 ```bash
 # 1. Create virtual environment
@@ -56,7 +56,7 @@ ollama pull mistral
 # Download free sounds from pixabay.com/sound-effects/
 ```
 
-## ▶️ Usage
+## Usage
 
 ### Web Interface
 ```bash
@@ -75,7 +75,7 @@ process_book("path/to/your/book.pdf")
 quick_test("path/to/your/book.pdf")
 ```
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 AI Audiobook/
@@ -97,8 +97,8 @@ AI Audiobook/
 └── README.md
 ```
 
-## 🎧 Processing Pipeline
+## Processing Pipeline
 
 ```
-PDF → Extract Text → Clean → Detect Dialogue → Analyze Emotions → Generate Voices → Add Sounds → Assemble → Final Audio 🎧
+PDF → Extract Text → Clean → Detect Dialogue → Analyze Emotions → Generate Voices → Add Sounds → Assemble → Final Audio
 ```
