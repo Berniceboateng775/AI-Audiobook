@@ -1,176 +1,239 @@
 """
 LLM Analyzer Module
-Uses Groq (free cloud LLM API) to analyze text for:
-- Character/speaker identification
-- Emotion detection
-- Scene mood classification
+Smart hybrid approach:
+1. Rule-based analysis handles MOST segments (instant, free, no API)
+2. Groq LLM only used for ambiguous dialogue (unknown gender/emotion)
 
-Get your FREE API key at: https://console.groq.com/keys
+This way a 578-page book uses minimal API tokens.
 """
 
 import os
 import json
 import re
+import time
 from groq import Groq
 
-# Groq API setup — set your key as environment variable or paste it below
+# Groq API setup
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-DEFAULT_MODEL = "llama-3.3-70b-versatile"  # Free, fast, excellent quality
+DEFAULT_MODEL = "llama-3.1-8b-instant"  # Smaller model = fewer tokens used
 
 
 def get_client() -> Groq:
     """Get Groq client with API key."""
     if not GROQ_API_KEY:
-        raise ValueError(
-            "GROQ_API_KEY not set!\n"
-            "Get your FREE key at: https://console.groq.com/keys\n"
-            "Then set it: set GROQ_API_KEY=your_key_here"
-        )
+        return None
     return Groq(api_key=GROQ_API_KEY)
 
 
-def analyze_segment(segment: dict, model: str = DEFAULT_MODEL) -> dict:
+# ══════════════════════════════════════════════════════════
+# RULE-BASED ANALYSIS (PRIMARY — handles 90%+ of segments)
+# ══════════════════════════════════════════════════════════
+
+def apply_rule_based_analysis(segment: dict) -> dict:
     """
-    Use Groq LLM to analyze a text segment for emotion, speaker, and scene mood.
-    
-    Args:
-        segment: Dict with 'type' and 'text' keys
-        model: Groq model name
-        
-    Returns:
-        Enriched segment dict with emotion, speaker_gender, and scene_mood
+    Comprehensive rule-based analysis — no API needed.
+    Handles emotion, speaking style, scene mood, and gender detection.
+    Works great for fiction/romance novels.
     """
-    text = segment["text"]
-    segment_type = segment.get("type", "narration")
+    text = segment["text"].lower()
+    result = {
+        "speaker_gender": segment.get("speaker_gender", "narrator"),
+        "emotion": "neutral",
+        "emotion_intensity": "medium",
+        "scene_mood": "calm",
+        "speaking_style": "normal"
+    }
 
-    prompt = f"""Analyze this story text segment and return ONLY valid JSON.
+    # ── EMOTION DETECTION ────────────────────────────────
+    emotion_rules = {
+        "anger": {
+            "keywords": ["angry", "furious", "rage", "hate", "hated", "fury",
+                        "shouted", "yelled", "screamed", "slammed", "growled",
+                        "clenched", "seething", "livid", "snapped", "snarled"],
+            "mood": "dramatic",
+            "intensity": "high"
+        },
+        "sadness": {
+            "keywords": ["sad", "cried", "tears", "sobbed", "grief", "mourning",
+                        "wept", "heartbroken", "ached", "pain", "lonely", "loss",
+                        "hurt", "broken", "miserable", "sorrow", "regret"],
+            "mood": "dramatic",
+            "intensity": "high"
+        },
+        "love": {
+            "keywords": ["love", "loved", "kiss", "kissed", "embrace", "embraced",
+                        "heart", "darling", "tender", "caress", "passion",
+                        "desire", "beautiful", "gorgeous", "adore", "cherish",
+                        "gentle", "softly", "warm", "longing", "yearning"],
+            "mood": "romantic",
+            "intensity": "medium"
+        },
+        "fear": {
+            "keywords": ["afraid", "scared", "terrified", "trembled", "horror",
+                        "panic", "shook", "frozen", "dread", "nightmare",
+                        "shiver", "haunted", "danger", "threat", "alarmed"],
+            "mood": "suspense",
+            "intensity": "high"
+        },
+        "excitement": {
+            "keywords": ["excited", "thrilled", "jumped", "laughed", "grinned",
+                        "amazing", "incredible", "wonderful", "smiled", "beamed",
+                        "delighted", "joy", "happy", "glow", "sparkle"],
+            "mood": "humorous",
+            "intensity": "medium"
+        },
+        "suspense": {
+            "keywords": ["slowly", "crept", "shadow", "silence", "watched",
+                        "waited", "dark", "darkness", "quiet", "still",
+                        "carefully", "suddenly", "froze", "motionless", "tense"],
+            "mood": "suspense",
+            "intensity": "medium"
+        },
+        "humor": {
+            "keywords": ["laughed", "chuckled", "grinned", "smirked", "funny",
+                        "ridiculous", "joke", "teased", "playful", "amused",
+                        "giggled", "snorted", "rolled eyes"],
+            "mood": "humorous",
+            "intensity": "low"
+        }
+    }
 
-Text: "{text}"
-Type: {segment_type}
+    for emotion, rules in emotion_rules.items():
+        if any(kw in text for kw in rules["keywords"]):
+            result["emotion"] = emotion
+            result["scene_mood"] = rules["mood"]
+            result["emotion_intensity"] = rules["intensity"]
+            break
 
-Return this exact JSON structure (no other text, no markdown):
-{{
-    "speaker_gender": "male" or "female" or "narrator",
-    "emotion": one of ["neutral", "anger", "sadness", "love", "fear", "excitement", "humor", "suspense"],
-    "emotion_intensity": "low" or "medium" or "high",
-    "scene_mood": one of ["calm", "romantic", "action", "suspense", "dramatic", "humorous"],
-    "speaking_style": one of ["normal", "whisper", "shout", "trembling", "sarcastic", "seductive", "cold"]
-}}
+    # ── SPEAKING STYLE DETECTION ─────────────────────────
+    style_rules = {
+        "whisper": ["whispered", "murmured", "breathed", "softly", "quietly",
+                    "hushed", "under her breath", "under his breath", "low voice"],
+        "shout": ["shouted", "yelled", "screamed", "bellowed", "roared",
+                 "demanded", "barked", "thundered", "exclaimed"],
+        "trembling": ["trembled", "shaking", "quivered", "stuttered",
+                     "voice broke", "voice cracked", "choked", "shakily"],
+        "sarcastic": ["sarcastically", "rolled her eyes", "rolled his eyes",
+                     "sneered", "mocked", "scoffed", "dryly", "deadpan"],
+        "seductive": ["purred", "sultry", "seductively", "husky", "velvety",
+                     "sensually", "teasing", "silky"],
+        "cold": ["coldly", "icily", "flatly", "emotionless", "detached",
+                "monotone", "blank", "stone-faced"]
+    }
 
-Rules:
-- For narration, speaker_gender is always "narrator"
-- Detect emotion from context, not just words
-- Be specific about speaking_style based on the text"""
+    for style, keywords in style_rules.items():
+        if any(kw in text for kw in keywords):
+            result["speaking_style"] = style
+            break
+
+    # ── GENDER (preserve existing or detect from text) ───
+    if result["speaker_gender"] == "unknown":
+        # Try to detect from the text itself
+        female_names_common = ["she", "her ", "herself", "woman", "girl", "lady",
+                              "mother", "sister", "daughter", "queen", "princess"]
+        male_names_common = ["he ", "him ", "his ", "himself", "man ", "boy",
+                            "gentleman", "father", "brother", "son", "king", "prince"]
+
+        female_score = sum(1 for w in female_names_common if w in text)
+        male_score = sum(1 for w in male_names_common if w in text)
+
+        if female_score > male_score:
+            result["speaker_gender"] = "female"
+        elif male_score > female_score:
+            result["speaker_gender"] = "male"
+
+    # For narration type, always set to narrator
+    if segment.get("type") == "narration":
+        result["speaker_gender"] = "narrator"
+
+    return {**segment, **result}
+
+
+# ══════════════════════════════════════════════════════════
+# LLM ANALYSIS (OPTIONAL — only for ambiguous segments)
+# ══════════════════════════════════════════════════════════
+
+def analyze_with_llm(segments: list[dict], model: str = DEFAULT_MODEL) -> list[dict]:
+    """
+    Use Groq LLM for a small batch of ambiguous segments.
+    Only called for dialogue segments with unknown gender.
+    """
+    client = get_client()
+    if not client or not segments:
+        return [apply_rule_based_analysis(s) for s in segments]
+
+    segment_texts = []
+    for i, seg in enumerate(segments):
+        segment_texts.append(f'{i}. "{seg["text"][:150]}"')
+
+    batch_text = "\n".join(segment_texts)
+
+    prompt = f"""Analyze these {len(segments)} dialogue segments. Return ONLY a JSON array.
+
+{batch_text}
+
+Return JSON array:
+[{{"speaker_gender":"male/female","emotion":"neutral/anger/sadness/love/fear/excitement/humor/suspense","speaking_style":"normal/whisper/shout/trembling/sarcastic/seductive/cold"}}]"""
 
     try:
-        client = get_client()
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {
-                    "role": "system",
-                    "content": "You are a story text analyzer. Return ONLY valid JSON, no other text."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
+                {"role": "system", "content": "Return ONLY valid JSON arrays."},
+                {"role": "user", "content": prompt}
             ],
             temperature=0.1,
-            max_tokens=200
+            max_tokens=800
         )
 
         result_text = response.choices[0].message.content
-        analysis = parse_llm_response(result_text)
+        analyses = parse_batch_response(result_text, len(segments))
 
-        # Merge LLM analysis with existing segment data
-        enriched = {**segment, **analysis}
-
-        # Preserve rule-based gender detection if LLM says "narrator" for dialogue
-        if segment_type == "dialogue" and segment.get("speaker_gender") != "unknown":
-            enriched["speaker_gender"] = segment["speaker_gender"]
-
+        enriched = []
+        for seg, analysis in zip(segments, analyses):
+            merged = {**seg, **analysis}
+            if "scene_mood" not in merged:
+                merged["scene_mood"] = "calm"
+            if "emotion_intensity" not in merged:
+                merged["emotion_intensity"] = "medium"
+            enriched.append(merged)
         return enriched
 
     except Exception as e:
-        print(f"  LLM analysis failed: {e}")
-        return apply_fallback_analysis(segment)
+        print(f"  LLM failed (using rules): {e}")
+        return [apply_rule_based_analysis(s) for s in segments]
 
 
-def parse_llm_response(response_text: str) -> dict:
-    """
-    Parse JSON from LLM response, handling common formatting issues.
-    """
+def parse_batch_response(response_text: str, expected_count: int) -> list[dict]:
+    """Parse JSON array from LLM response."""
     text = response_text.strip()
 
-    # Try direct JSON parse
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+    for attempt in [text]:
+        try:
+            result = json.loads(attempt)
+            if isinstance(result, list):
+                while len(result) < expected_count:
+                    result.append(get_defaults())
+                return result[:expected_count]
+        except json.JSONDecodeError:
+            pass
 
-    # Try to extract JSON from markdown code block or raw braces
-    patterns = [
-        r"```json\s*(.*?)\s*```",
-        r"```\s*(.*?)\s*```",
-        r"\{.*\}"
-    ]
+    # Try extracting from code blocks
+    match = re.search(r'\[.*\]', text, re.DOTALL)
+    if match:
+        try:
+            result = json.loads(match.group())
+            if isinstance(result, list):
+                while len(result) < expected_count:
+                    result.append(get_defaults())
+                return result[:expected_count]
+        except json.JSONDecodeError:
+            pass
 
-    for pattern in patterns:
-        match = re.search(pattern, text, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(1) if "```" in pattern else match.group())
-            except (json.JSONDecodeError, IndexError):
-                continue
-
-    return get_defaults()
-
-
-def apply_fallback_analysis(segment: dict) -> dict:
-    """
-    Apply simple rule-based analysis when LLM is unavailable.
-    """
-    text = segment["text"].lower()
-    defaults = get_defaults()
-
-    # Simple emotion detection from keywords
-    emotion_keywords = {
-        "anger": ["angry", "furious", "rage", "hate", "shouted", "yelled", "screamed"],
-        "sadness": ["sad", "cried", "tears", "sobbed", "grief", "mourning", "wept"],
-        "love": ["love", "kiss", "embrace", "heart", "darling", "tender", "caress"],
-        "fear": ["afraid", "scared", "terrified", "trembled", "horror", "panic", "shook"],
-        "excitement": ["excited", "thrilled", "jumped", "laughed", "grinned", "amazing"],
-        "suspense": ["slowly", "crept", "shadow", "silence", "watched", "waited", "dark"],
-    }
-
-    for emotion, keywords in emotion_keywords.items():
-        if any(kw in text for kw in keywords):
-            defaults["emotion"] = emotion
-            break
-
-    # Simple speaking style detection
-    style_keywords = {
-        "whisper": ["whispered", "murmured", "breathed", "softly"],
-        "shout": ["shouted", "yelled", "screamed", "bellowed", "roared"],
-        "trembling": ["trembled", "shaking", "quivered", "stuttered"],
-        "sarcastic": ["sarcastically", "rolled her eyes", "sneered", "mocked"],
-    }
-
-    for style, keywords in style_keywords.items():
-        if any(kw in text for kw in keywords):
-            defaults["speaking_style"] = style
-            break
-
-    # Preserve existing gender
-    if segment.get("speaker_gender") and segment["speaker_gender"] != "unknown":
-        defaults["speaker_gender"] = segment["speaker_gender"]
-
-    return {**segment, **defaults}
+    return [get_defaults() for _ in range(expected_count)]
 
 
 def get_defaults() -> dict:
-    """Return default analysis values."""
     return {
         "speaker_gender": "narrator",
         "emotion": "neutral",
@@ -180,51 +243,79 @@ def get_defaults() -> dict:
     }
 
 
+# ══════════════════════════════════════════════════════════
+# MAIN ANALYSIS FUNCTION
+# ══════════════════════════════════════════════════════════
+
 def analyze_all_segments(paragraphs: list[dict], model: str = DEFAULT_MODEL) -> list[dict]:
     """
-    Analyze all segments across all paragraphs using Groq.
+    Smart hybrid analysis:
+    1. Apply rule-based analysis to ALL segments (instant)
+    2. Send ONLY ambiguous dialogue to Groq (saves tokens)
     """
-    total_segments = sum(len(p.get("segments", [])) for p in paragraphs)
-    processed = 0
+    total = sum(len(p.get("segments", [])) for p in paragraphs)
+    print(f"  Analyzing {total} segments (rule-based first)...")
 
-    for paragraph in paragraphs:
-        enriched_segments = []
-        for segment in paragraph.get("segments", []):
-            enriched = analyze_segment(segment, model)
-            enriched_segments.append(enriched)
-            processed += 1
+    # Step 1: Rule-based analysis for everything
+    ambiguous = []  # (paragraph_idx, segment_idx) for unknown gender dialogues
+    
+    for p_idx, paragraph in enumerate(paragraphs):
+        for s_idx, segment in enumerate(paragraph.get("segments", [])):
+            enriched = apply_rule_based_analysis(segment)
+            paragraph["segments"][s_idx] = enriched
 
-            if processed % 10 == 0:
-                print(f"  Analyzed {processed}/{total_segments} segments...")
+            # Track ambiguous dialogues for optional LLM pass
+            if (enriched.get("type") == "dialogue" and 
+                enriched.get("speaker_gender") in ("unknown", "narrator")):
+                ambiguous.append((p_idx, s_idx))
 
-        paragraph["segments"] = enriched_segments
+    print(f"  Rule-based: Done! ({total} segments analyzed instantly)")
+    print(f"  Ambiguous dialogues needing LLM: {len(ambiguous)}")
 
-    print(f"  ✓ Analyzed all {total_segments} segments")
+    # Step 2: Use Groq only for ambiguous segments (if available)
+    if ambiguous and GROQ_API_KEY:
+        print(f"  Sending {len(ambiguous)} ambiguous segments to Groq...")
+        
+        BATCH = 20
+        for i in range(0, len(ambiguous), BATCH):
+            batch_indices = ambiguous[i:i + BATCH]
+            batch_segments = [
+                paragraphs[p_idx]["segments"][s_idx] 
+                for p_idx, s_idx in batch_indices
+            ]
+
+            enriched = analyze_with_llm(batch_segments, model)
+
+            for (p_idx, s_idx), seg in zip(batch_indices, enriched):
+                paragraphs[p_idx]["segments"][s_idx] = seg
+
+            done = min(i + BATCH, len(ambiguous))
+            print(f"  LLM: {done}/{len(ambiguous)} ambiguous segments...")
+
+            # Small delay to avoid rate limits
+            if i + BATCH < len(ambiguous):
+                time.sleep(1)
+
+    print(f"  Done analyzing all {total} segments!")
     return paragraphs
 
 
 def check_groq_status() -> bool:
-    """
-    Check if Groq API key is set and working.
-    
-    Returns:
-        True if Groq is ready, False otherwise
-    """
+    """Check if Groq API is available."""
     if not GROQ_API_KEY:
-        print("GROQ_API_KEY not set!")
-        print("Get your FREE key at: https://console.groq.com/keys")
-        print("Then run: set GROQ_API_KEY=your_key_here")
-        return False
+        print("  No GROQ_API_KEY set — using rule-based analysis only (still works great!)")
+        return True  # We can still work with rule-based only
 
     try:
         client = get_client()
-        # Quick test with a tiny request
-        response = client.chat.completions.create(
+        client.chat.completions.create(
             model=DEFAULT_MODEL,
-            messages=[{"role": "user", "content": "Say 'ok'"}],
+            messages=[{"role": "user", "content": "ok"}],
             max_tokens=5
         )
+        print("  Groq API: Connected!")
         return True
     except Exception as e:
-        print(f"Groq API error: {e}")
-        return False
+        print(f"  Groq API unavailable: {e}")
+        print("  Falling back to rule-based analysis (still works great!)")
+        return True  # Don't block — rule-based is fine

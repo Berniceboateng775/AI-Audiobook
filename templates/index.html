@@ -393,6 +393,8 @@
             <span class="result-icon">🎧</span>
             <h3>Your Audiobook is Ready!</h3>
             <p id="resultInfo">Your story has been transformed into a cinematic audio experience</p>
+            <audio id="audioPlayer" controls style="width:100%; margin-bottom:20px; border-radius:12px;"></audio>
+            <br>
             <a class="download-btn" id="downloadBtn" href="#">Download Audiobook</a>
         </div>
 
@@ -411,7 +413,7 @@
         </div>
 
         <footer class="footer">
-            <p>Built with Ollama + Coqui TTS + FastAPI — 100% Free & Open Source</p>
+            <p>Built with Groq + edge-tts + FastAPI — 100% Free & Open Source</p>
         </footer>
     </div>
 
@@ -540,8 +542,13 @@
             const resultCard = document.getElementById('resultCard');
             resultCard.classList.add('active');
 
+            const audioUrl = `/download/${currentJobId}`;
             const downloadBtn = document.getElementById('downloadBtn');
-            downloadBtn.href = `/download/${currentJobId}`;
+            downloadBtn.href = audioUrl;
+
+            const audioPlayer = document.getElementById('audioPlayer');
+            audioPlayer.src = audioUrl;
+            audioPlayer.style.display = 'block';
         }
 
         function showError(message) {
