@@ -12,7 +12,6 @@ from app.text_cleaner import process_text
 from app.dialogue_detector import process_paragraphs
 from app.llm_analyzer import analyze_all_segments, check_groq_status
 from app.audio_assembler import assemble_audiobook
-from app.sound_effects import print_sound_setup_guide
 from app.voice_engine import assign_pov_to_segments
 
 

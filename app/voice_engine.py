@@ -1,19 +1,19 @@
 """
-Voice Engine Module — OVERHAULED for quality
-Uses edge-tts with SSML for expressive, cinematic voice performance.
-Features:
-- POV-aware narrator gender (female narration for female scenes)
-- Deep, distinct male/female voices
-- SSML prosody for emotional expression
-- Consistent voice per character
+Voice Engine Module
+Uses pyttsx3 (offline Windows SAPI voices) for distinct male/female voices.
+Falls back to gTTS (Google) if SAPI voices unavailable.
+
+- David = deep male voice (narrator/dialogue)
+- Zira = female voice (narrator/dialogue)
+- Rate/volume adjustments for emotional expression
 """
 
 import os
-import sys
-import subprocess
 import tempfile
 import shutil
+import pyttsx3
 from pydub import AudioSegment
+import threading
 
 
 # ══════════════════════════════════════════════════════════
@@ -28,20 +28,17 @@ def _find_ffmpeg():
         r"C:\ffmpeg\bin",
         r"C:\ProgramData\chocolatey\bin",
     ]
-    for search_dir in search_paths:
-        ffmpeg_path = os.path.join(search_dir, "ffmpeg.exe")
-        if os.path.exists(ffmpeg_path):
-            os.environ["PATH"] = search_dir + ";" + os.environ.get("PATH", "")
-            AudioSegment.converter = ffmpeg_path
-            ffprobe_path = os.path.join(search_dir, "ffprobe.exe")
-            if os.path.exists(ffprobe_path):
-                AudioSegment.ffprobe = ffprobe_path
-            print(f"  Found ffmpeg at: {search_dir}")
+    for d in search_paths:
+        if os.path.exists(os.path.join(d, "ffmpeg.exe")):
+            os.environ["PATH"] = d + ";" + os.environ.get("PATH", "")
+            AudioSegment.converter = os.path.join(d, "ffmpeg.exe")
+            if os.path.exists(os.path.join(d, "ffprobe.exe")):
+                AudioSegment.ffprobe = os.path.join(d, "ffprobe.exe")
+            print(f"  Found ffmpeg at: {d}")
             return
-    # Try recursive WinGet search
-    winget_dir = os.path.expanduser(r"~\AppData\Local\Microsoft\WinGet\Packages")
-    if os.path.exists(winget_dir):
-        for root, dirs, files in os.walk(winget_dir):
+    wp = os.path.expanduser(r"~\AppData\Local\Microsoft\WinGet\Packages")
+    if os.path.exists(wp):
+        for root, dirs, files in os.walk(wp):
             if "ffmpeg.exe" in files:
                 os.environ["PATH"] = root + ";" + os.environ.get("PATH", "")
                 AudioSegment.converter = os.path.join(root, "ffmpeg.exe")
@@ -54,128 +51,108 @@ _find_ffmpeg()
 
 
 # ══════════════════════════════════════════════════════════
-# VOICE MAPPING — Carefully chosen for distinct, rich voices
+# TTS ENGINE SETUP
 # ══════════════════════════════════════════════════════════
 
-VOICE_MAP = {
-    # Female voices — warm, expressive
-    "female_1":     "en-US-JennyNeural",       # Warm, emotional (main female)
-    "female_2":     "en-US-AriaNeural",         # Soft, breathy (whispers/love)
-    "female_3":     "en-US-MichelleNeural",     # Strong, confident
+# Thread lock — pyttsx3 is NOT thread-safe
+_tts_lock = threading.Lock()
 
-    # Male voices — deep, commanding
-    "male_1":       "en-US-DavisNeural",        # Deep, smooth (main male - DEEPEST)
-    "male_2":       "en-US-GuyNeural",          # Standard male
-    "male_3":       "en-US-JasonNeural",        # Strong, commanding
+# Discover available SAPI voices once at startup
+_voice_ids = {}
+try:
+    _engine = pyttsx3.init()
+    _voices = _engine.getProperty('voices')
+    for v in _voices:
+        name_lower = v.name.lower()
+        if 'david' in name_lower:
+            _voice_ids['male'] = v.id
+        elif 'zira' in name_lower:
+            _voice_ids['female'] = v.id
+    _engine.stop()
+    del _engine
+    print(f"  SAPI voices found: {list(_voice_ids.keys())}")
+except Exception as e:
+    print(f"  pyttsx3 init warning: {e}")
 
-    # Narrator voices  
-    "narrator_male":   "en-US-ChristopherNeural",  # Clear male narrator
-    "narrator_female": "en-US-JennyNeural",         # Clear female narrator
-}
+# Base speaking rate (words per minute)
+BASE_RATE = 175
 
 
 # ══════════════════════════════════════════════════════════
-# EMOTION → SSML PROSODY SETTINGS (much more expressive)
+# EMOTION → VOICE ADJUSTMENTS
 # ══════════════════════════════════════════════════════════
 
-EMOTION_SSML = {
-    "neutral":    {"rate": "0%",   "pitch": "0%",   "volume": "medium"},
-    "anger":      {"rate": "15%",  "pitch": "5%",   "volume": "loud"},
-    "sadness":    {"rate": "-20%", "pitch": "-8%",  "volume": "soft"},
-    "love":       {"rate": "-15%", "pitch": "-3%",  "volume": "soft"},
-    "fear":       {"rate": "10%",  "pitch": "10%",  "volume": "x-soft"},
-    "excitement": {"rate": "20%",  "pitch": "8%",   "volume": "loud"},
-    "humor":      {"rate": "5%",   "pitch": "5%",   "volume": "medium"},
-    "suspense":   {"rate": "-25%", "pitch": "-5%",  "volume": "soft"},
+EMOTION_SETTINGS = {
+    "neutral":     {"rate_mult": 1.0,  "vol": 1.0},
+    "anger":       {"rate_mult": 1.15, "vol": 1.0},
+    "sadness":     {"rate_mult": 0.85, "vol": 0.8},
+    "love":        {"rate_mult": 0.90, "vol": 0.85},
+    "fear":        {"rate_mult": 1.10, "vol": 0.75},
+    "excitement":  {"rate_mult": 1.20, "vol": 1.0},
+    "humor":       {"rate_mult": 1.05, "vol": 0.95},
+    "suspense":    {"rate_mult": 0.80, "vol": 0.85},
+    "frustration": {"rate_mult": 1.10, "vol": 1.0},
+    "surprise":    {"rate_mult": 1.15, "vol": 1.0},
+    "self-doubt":  {"rate_mult": 0.90, "vol": 0.8},
 }
 
 STYLE_VOLUME_DB = {
-    "normal": 0, "whisper": -10, "shout": +5, "trembling": -5,
-    "sarcastic": 0, "seductive": -7, "cold": -2,
+    "normal": 0, "whisper": -8, "shout": +5, "trembling": -4,
+    "sarcastic": 0, "seductive": -5, "cold": -2,
 }
 
 
-def get_voice_for_segment(segment: dict) -> str:
-    """
-    Smart voice selection based on gender, type, and context.
-    Uses POV-aware narrator voice (female narrator for female scenes).
-    """
+def get_voice_gender(segment: dict) -> str:
+    """Determine which voice gender to use for a segment."""
     gender = segment.get("speaker_gender", "narrator")
     seg_type = segment.get("type", "narration")
-    style = segment.get("speaking_style", "normal")
-    emotion = segment.get("emotion", "neutral")
 
-    # NARRATION — use the POV narrator voice
-    if seg_type == "narration" or gender == "narrator":
+    # Dialogue: use speaker gender
+    if seg_type == "dialogue":
+        if gender == "female":
+            return "female"
+        elif gender == "male":
+            return "male"
+        # Unknown gender → use POV
         pov = segment.get("pov_gender", "male")
-        if pov == "female":
-            return VOICE_MAP["narrator_female"]
-        return VOICE_MAP["narrator_male"]
+        return pov
 
-    # FEMALE DIALOGUE
-    if gender == "female":
-        if style in ["whisper", "seductive", "trembling"]:
-            return VOICE_MAP["female_2"]  # Soft, breathy Aria
-        elif style in ["shout", "cold"]:
-            return VOICE_MAP["female_3"]  # Strong Michelle
-        return VOICE_MAP["female_1"]  # Main female Jenny
-
-    # MALE DIALOGUE — always use deep voice as primary
-    if gender == "male":
-        if style in ["shout", "cold"]:
-            return VOICE_MAP["male_3"]  # Commanding Jason
-        return VOICE_MAP["male_1"]  # Deep Davis (ALWAYS deep for male)
-
-    # Unknown → use paragraph POV narrator
+    # Narration: use POV gender
     pov = segment.get("pov_gender", "male")
-    if pov == "female":
-        return VOICE_MAP["narrator_female"]
-    return VOICE_MAP["narrator_male"]
+    return pov
 
 
-def generate_speech(text, voice, emotion="neutral", speaking_style="normal"):
-    """
-    Generate speech using edge-tts CLI subprocess.
-    Adjusts rate and pitch based on emotion.
-    """
+def generate_speech_pyttsx3(text: str, gender: str, emotion: str = "neutral") -> AudioSegment:
+    """Generate speech using pyttsx3 (Windows SAPI voices)."""
     text = text.strip()
     if len(text) < 2:
         return AudioSegment.silent(duration=300)
 
-    # Get emotion settings
-    settings = EMOTION_SSML.get(emotion, EMOTION_SSML["neutral"])
+    voice_id = _voice_ids.get(gender, _voice_ids.get("male") or _voice_ids.get("female"))
+    if not voice_id:
+        return _generate_speech_gtts(text)
 
-    temp_file = tempfile.mktemp(suffix=".mp3")
+    settings = EMOTION_SETTINGS.get(emotion, EMOTION_SETTINGS["neutral"])
+    rate = int(BASE_RATE * settings["rate_mult"])
+    volume = settings["vol"]
+
+    temp_file = tempfile.mktemp(suffix=".wav")
 
     try:
-        cmd = [
-            sys.executable, "-m", "edge_tts",
-            "--voice", voice,
-            "--rate", f"+{settings['rate']}" if not settings['rate'].startswith('-') else settings['rate'],
-            "--pitch", f"+{settings['pitch']}" if not settings['pitch'].startswith('-') else settings['pitch'],
-            "--text", text,
-            "--write-media", temp_file
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-        if result.returncode != 0:
-            return AudioSegment.silent(duration=500)
+        with _tts_lock:
+            engine = pyttsx3.init()
+            engine.setProperty('voice', voice_id)
+            engine.setProperty('rate', rate)
+            engine.setProperty('volume', volume)
+            engine.save_to_file(text, temp_file)
+            engine.runAndWait()
+            engine.stop()
+            del engine
 
         if not os.path.exists(temp_file) or os.path.getsize(temp_file) < 100:
             return AudioSegment.silent(duration=500)
 
-        audio = AudioSegment.from_mp3(temp_file)
-
-        # Apply volume adjustments for speaking style
-        vol = STYLE_VOLUME_DB.get(speaking_style, 0)
-        if vol != 0:
-            audio = audio + vol
-
-        # Whisper: low-pass filter for softer highs
-        if speaking_style == "whisper":
-            audio = audio.low_pass_filter(3000)
-
+        audio = AudioSegment.from_wav(temp_file)
         return audio
 
     except Exception as e:
@@ -189,89 +166,123 @@ def generate_speech(text, voice, emotion="neutral", speaking_style="normal"):
                 pass
 
 
+def _generate_speech_gtts(text: str) -> AudioSegment:
+    """Fallback: Google TTS (requires internet, one voice only)."""
+    try:
+        from gtts import gTTS
+        temp_file = tempfile.mktemp(suffix=".mp3")
+        tts = gTTS(text, lang='en')
+        tts.save(temp_file)
+        audio = AudioSegment.from_mp3(temp_file)
+        os.remove(temp_file)
+        return audio
+    except Exception as e:
+        print(f"  gTTS fallback error: {e}")
+        return AudioSegment.silent(duration=500)
+
+
+def generate_speech(text, voice=None, emotion="neutral", speaking_style="normal"):
+    """Generate speech — main entry point."""
+    text = text.strip()
+    if len(text) < 2:
+        return AudioSegment.silent(duration=300)
+
+    gender = "male"
+    if voice and ("jenny" in voice.lower() or "aria" in voice.lower() or
+                  "michelle" in voice.lower() or "sara" in voice.lower()):
+        gender = "female"
+
+    audio = generate_speech_pyttsx3(text, gender, emotion)
+
+    # Apply style volume
+    vol = STYLE_VOLUME_DB.get(speaking_style, 0)
+    if vol != 0:
+        audio = audio + vol
+    if speaking_style == "whisper":
+        audio = audio.low_pass_filter(3000)
+
+    return audio
+
+
 def generate_segment_audio(segment: dict) -> AudioSegment:
-    """Generate audio for a fully analyzed text segment with smart voice selection."""
+    """Generate audio for a fully analyzed segment."""
     text = segment.get("text", "").strip()
     if not text or len(text) < 2:
         return AudioSegment.silent(duration=200)
 
-    voice = get_voice_for_segment(segment)
+    gender = get_voice_gender(segment)
     emotion = segment.get("emotion", "neutral")
     style = segment.get("speaking_style", "normal")
 
-    return generate_speech(text, voice, emotion, style)
+    audio = generate_speech_pyttsx3(text, gender, emotion)
+
+    vol = STYLE_VOLUME_DB.get(style, 0)
+    if vol != 0:
+        audio = audio + vol
+    if style == "whisper":
+        audio = audio.low_pass_filter(3000)
+
+    return audio
 
 
 # ══════════════════════════════════════════════════════════
-# POV DETECTION — Determines narrator gender per paragraph
+# POV DETECTION
 # ══════════════════════════════════════════════════════════
 
 def detect_paragraph_pov(paragraph: dict) -> str:
-    """
-    Detect the point-of-view gender for a paragraph.
-    In romance novels, narration between dialogue is from the POV character.
-    
-    Strategy:
-    - Check dialogue gender distribution in this paragraph
-    - Check for first-person pronouns + gendered cues
-    - Use majority gender of nearby characters
-    """
+    """Detect narrator POV gender per paragraph."""
     segments = paragraph.get("segments", [])
     full_text = paragraph.get("text", "").lower()
-    
-    # First-person female cues in narration
+
+    # Narrator describes male → POV is female
     female_pov_cues = [
-        "my dress", "my heels", "my hair", "my lipstick", "my purse",
-        "i adjusted my", "my heart raced", "my chest tightened",
-        "i blushed", "my cheeks", "he was", "he looked", "his eyes",
-        "his jaw", "his hand", "his chest", "he said", "he murmured",
-        "he whispered", "he growled", "handsome", "his smile",
-        "he pulled me", "he kissed me",
+        "his eyes", "his jaw", "his hand", "his chest", "his voice",
+        "his smile", "his lips", "his arms", "his face", "his gaze",
+        "he said", "he murmured", "he whispered", "he growled",
+        "he asked", "he replied", "he looked", "he was",
+        "handsome", "he pulled me", "he kissed",
     ]
-    
-    # First-person male cues in narration  
+    # Narrator describes female → POV is male
     male_pov_cues = [
-        "my tie", "my suit", "clenched my fist", "my jaw",
-        "she was", "she looked", "her eyes", "her lips", "her hair",
-        "her smile", "she said", "she whispered", "she murmured",
-        "beautiful", "gorgeous", "she blushed", "her dress",
-        "i pulled her", "i kissed her", "her scent",
+        "her eyes", "her lips", "her hair", "her smile", "her face",
+        "her voice", "her hand", "her dress", "her scent", "her body",
+        "she said", "she murmured", "she whispered", "she laughed",
+        "she asked", "she replied", "she looked", "she was",
+        "beautiful", "gorgeous", "she blushed", "i kissed her",
     ]
-    
-    female_score = sum(1 for cue in female_pov_cues if cue in full_text)
-    male_score = sum(1 for cue in male_pov_cues if cue in full_text)
-    
-    # Also check dialogue genders — if most dialogue is male,
-    # the POV is likely female (opposite gender = who they're talking to)
-    dialogue_genders = {"male": 0, "female": 0}
+
+    female_score = sum(1 for c in female_pov_cues if c in full_text)
+    male_score = sum(1 for c in male_pov_cues if c in full_text)
+
+    male_dialogue = 0
+    female_dialogue = 0
     for seg in segments:
         if seg.get("type") == "dialogue":
             g = seg.get("speaker_gender", "unknown")
-            if g in dialogue_genders:
-                dialogue_genders[g] += 1
-    
-    # More male dialogue speakers → POV is likely female (and vice versa)
-    if dialogue_genders["male"] > dialogue_genders["female"] + 2:
-        female_score += 3
-    elif dialogue_genders["female"] > dialogue_genders["male"] + 2:
-        male_score += 3
-    
+            if g == "male":
+                male_dialogue += 1
+            elif g == "female":
+                female_dialogue += 1
+
+    if male_dialogue > female_dialogue + 1:
+        female_score += 2
+    elif female_dialogue > male_dialogue + 1:
+        male_score += 2
+
     if female_score > male_score:
         return "female"
     elif male_score > female_score:
         return "male"
-    
-    return "female"  # Default to female for romance novels
+
+    # Default: alternate
+    idx = paragraph.get("paragraph_index", 0)
+    return "female" if idx % 2 == 0 else "male"
 
 
 def assign_pov_to_segments(paragraphs: list[dict]) -> list[dict]:
-    """
-    Assign POV gender to all segments in all paragraphs.
-    This determines which voice reads the narration.
-    """
+    """Assign POV gender to all segments."""
     for paragraph in paragraphs:
         pov = detect_paragraph_pov(paragraph)
         for segment in paragraph.get("segments", []):
             segment["pov_gender"] = pov
-    
     return paragraphs

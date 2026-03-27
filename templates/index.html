@@ -482,6 +482,14 @@
 
             try {
                 const response = await fetch(`/status/${currentJobId}`);
+                
+                // Stop polling if job not found (old/expired job)
+                if (response.status === 404) {
+                    clearInterval(statusInterval);
+                    currentJobId = null;
+                    return;
+                }
+                
                 const data = await response.json();
 
                 document.getElementById('progressDetail').textContent = data.progress;
