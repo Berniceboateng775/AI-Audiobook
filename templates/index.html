@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Cinematic Audiobook Engine</title>
+    <meta name="description" content="Transform PDF storybooks into dramatic, multi-voice audio performances with AI">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #0a0a0f;
+            color: #e0e0e8;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Animated background */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background:
+                radial-gradient(ellipse at 20% 50%, rgba(120, 50, 255, 0.08) 0%, transparent 60%),
+                radial-gradient(ellipse at 80% 20%, rgba(255, 50, 120, 0.06) 0%, transparent 60%),
+                radial-gradient(ellipse at 50% 80%, rgba(50, 180, 255, 0.05) 0%, transparent 60%);
+            z-index: -1;
+            animation: bgPulse 8s ease-in-out infinite alternate;
+        }
+
+        @keyframes bgPulse {
+            0% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+
+        .container {
+            max-width: 720px;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+
+        /* Header */
+        .header {
+            text-align: center;
+            margin-bottom: 48px;
+        }
+
+        .header .icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+            display: block;
+            animation: float 3s ease-in-out infinite;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-8px); }
+        }
+
+        .header h1 {
+            font-size: 32px;
+            font-weight: 800;
+            background: linear-gradient(135deg, #a78bfa, #f472b6, #60a5fa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 8px;
+            letter-spacing: -0.5px;
+        }
+
+        .header p {
+            color: #8888a0;
+            font-size: 15px;
+            font-weight: 300;
+        }
+
+        /* Upload Card */
+        .upload-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 20px;
+            padding: 48px 32px;
+            text-align: center;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .upload-card::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(135deg, rgba(120, 50, 255, 0.05), rgba(255, 50, 120, 0.03));
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .upload-card:hover::before {
+            opacity: 1;
+        }
+
+        .upload-card:hover {
+            border-color: rgba(167, 139, 250, 0.3);
+            transform: translateY(-2px);
+        }
+
+        .upload-card.drag-over {
+            border-color: rgba(167, 139, 250, 0.6);
+            background: rgba(167, 139, 250, 0.08);
+        }
+
+        .upload-icon {
+            font-size: 56px;
+            margin-bottom: 16px;
+            display: block;
+            opacity: 0.8;
+        }
+
+        .upload-card h2 {
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #c8c8d8;
+        }
+
+        .upload-card p {
+            color: #686880;
+            font-size: 14px;
+        }
+
+        .upload-btn {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 12px 32px;
+            background: linear-gradient(135deg, #7c3aed, #c026d3);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-family: 'Inter', sans-serif;
+        }
+
+        .upload-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 8px 30px rgba(124, 58, 237, 0.3);
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        /* Status Card */
+        .status-card {
+            display: none;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 20px;
+            padding: 32px;
+            margin-top: 24px;
+        }
+
+        .status-card.active {
+            display: block;
+            animation: slideUp 0.4s ease;
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(16px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .status-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #fbbf24;
+            animation: pulse 1.5s infinite;
+        }
+
+        .status-dot.completed {
+            background: #34d399;
+            animation: none;
+        }
+
+        .status-dot.failed {
+            background: #f87171;
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .status-text {
+            font-size: 15px;
+            font-weight: 500;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.06);
+            border-radius: 2px;
+            overflow: hidden;
+            margin-bottom: 16px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #7c3aed, #c026d3, #7c3aed);
+            background-size: 200% 100%;
+            animation: shimmer 2s linear infinite;
+            width: 60%;
+            transition: width 0.5s ease;
+        }
+
+        .progress-fill.completed {
+            width: 100%;
+            background: #34d399;
+            animation: none;
+        }
+
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+
+        .progress-detail {
+            font-size: 13px;
+            color: #686880;
+        }
+
+        /* Result Card */
+        .result-card {
+            display: none;
+            background: rgba(52, 211, 153, 0.05);
+            border: 1px solid rgba(52, 211, 153, 0.15);
+            border-radius: 20px;
+            padding: 32px;
+            margin-top: 24px;
+            text-align: center;
+        }
+
+        .result-card.active {
+            display: block;
+            animation: slideUp 0.4s ease;
+        }
+
+        .result-icon {
+            font-size: 48px;
+            margin-bottom: 12px;
+            display: block;
+        }
+
+        .result-card h3 {
+            font-size: 20px;
+            font-weight: 600;
+            color: #34d399;
+            margin-bottom: 8px;
+        }
+
+        .result-card p {
+            color: #8888a0;
+            font-size: 14px;
+            margin-bottom: 20px;
+        }
+
+        .download-btn {
+            display: inline-block;
+            padding: 14px 36px;
+            background: linear-gradient(135deg, #059669, #10b981);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            font-family: 'Inter', sans-serif;
+        }
+
+        .download-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 8px 30px rgba(16, 185, 129, 0.3);
+        }
+
+        /* Pipeline Steps Visualization */
+        .pipeline {
+            margin-top: 40px;
+        }
+
+        .pipeline h3 {
+            font-size: 14px;
+            font-weight: 600;
+            color: #686880;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 16px;
+        }
+
+        .pipeline-steps {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .step-tag {
+            padding: 6px 14px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 8px;
+            font-size: 12px;
+            color: #8888a0;
+            transition: all 0.3s ease;
+        }
+
+        .step-tag.active {
+            border-color: rgba(167, 139, 250, 0.4);
+            color: #a78bfa;
+            background: rgba(167, 139, 250, 0.08);
+        }
+
+        .step-tag.done {
+            border-color: rgba(52, 211, 153, 0.3);
+            color: #34d399;
+            background: rgba(52, 211, 153, 0.06);
+        }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            margin-top: 60px;
+            color: #44445a;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <span class="icon">🎭</span>
+            <h1>AI Cinematic Audiobook</h1>
+            <p>Transform your storybooks into dramatic audio performances</p>
+        </header>
+
+        <!-- Upload Area -->
+        <div class="upload-card" id="uploadArea" onclick="document.getElementById('fileInput').click()">
+            <span class="upload-icon">📄</span>
+            <h2>Drop your PDF here</h2>
+            <p>or click to browse</p>
+            <button class="upload-btn" onclick="event.stopPropagation(); document.getElementById('fileInput').click()">
+                Choose PDF File
+            </button>
+            <input type="file" id="fileInput" accept=".pdf" onchange="handleUpload(this.files[0])">
+        </div>
+
+        <!-- Status Card -->
+        <div class="status-card" id="statusCard">
+            <div class="status-header">
+                <div class="status-dot" id="statusDot"></div>
+                <span class="status-text" id="statusText">Processing...</span>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <p class="progress-detail" id="progressDetail">Extracting text from PDF...</p>
+        </div>
+
+        <!-- Result Card -->
+        <div class="result-card" id="resultCard">
+            <span class="result-icon">🎧</span>
+            <h3>Your Audiobook is Ready!</h3>
+            <p id="resultInfo">Your story has been transformed into a cinematic audio experience</p>
+            <a class="download-btn" id="downloadBtn" href="#">Download Audiobook</a>
+        </div>
+
+        <!-- Pipeline Steps -->
+        <div class="pipeline">
+            <h3>Processing Pipeline</h3>
+            <div class="pipeline-steps" id="pipelineSteps">
+                <span class="step-tag" data-step="1">📄 PDF Extract</span>
+                <span class="step-tag" data-step="2">🧹 Clean Text</span>
+                <span class="step-tag" data-step="3">💬 Detect Dialogue</span>
+                <span class="step-tag" data-step="4">🧠 Analyze Emotions</span>
+                <span class="step-tag" data-step="5">🎙️ Generate Voices</span>
+                <span class="step-tag" data-step="6">🎶 Add Sounds</span>
+                <span class="step-tag" data-step="7">🎧 Assemble Audio</span>
+            </div>
+        </div>
+
+        <footer class="footer">
+            <p>Built with Ollama + Coqui TTS + FastAPI — 100% Free & Open Source</p>
+        </footer>
+    </div>
+
+    <script>
+        let currentJobId = null;
+        let statusInterval = null;
+
+        // Drag & Drop
+        const uploadArea = document.getElementById('uploadArea');
+
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('drag-over');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('drag-over');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('drag-over');
+            const file = e.dataTransfer.files[0];
+            if (file && file.name.endsWith('.pdf')) {
+                handleUpload(file);
+            }
+        });
+
+        async function handleUpload(file) {
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            // Show status
+            document.getElementById('statusCard').classList.add('active');
+            document.getElementById('resultCard').classList.remove('active');
+            document.getElementById('statusText').textContent = `Processing: ${file.name}`;
+            document.getElementById('progressDetail').textContent = 'Uploading PDF...';
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    currentJobId = data.job_id;
+                    startPolling();
+                } else {
+                    showError(data.error || 'Upload failed');
+                }
+            } catch (err) {
+                showError('Connection error: ' + err.message);
+            }
+        }
+
+        function startPolling() {
+            statusInterval = setInterval(checkStatus, 2000);
+        }
+
+        async function checkStatus() {
+            if (!currentJobId) return;
+
+            try {
+                const response = await fetch(`/status/${currentJobId}`);
+                const data = await response.json();
+
+                document.getElementById('progressDetail').textContent = data.progress;
+
+                // Update pipeline step indicators
+                updatePipelineSteps(data.progress);
+
+                if (data.status === 'completed') {
+                    clearInterval(statusInterval);
+                    showCompleted();
+                } else if (data.status === 'failed') {
+                    clearInterval(statusInterval);
+                    showError(data.error || 'Processing failed');
+                }
+            } catch (err) {
+                console.error('Status check failed:', err);
+            }
+        }
+
+        function updatePipelineSteps(progress) {
+            const steps = document.querySelectorAll('.step-tag');
+            const progressLower = progress.toLowerCase();
+
+            const stepKeywords = [
+                'extract', 'clean', 'dialogue', 'emotion', 'voice', 'sound', 'assembl'
+            ];
+
+            let activeFound = false;
+            stepKeywords.forEach((keyword, i) => {
+                if (progressLower.includes(keyword)) {
+                    // Mark previous steps as done
+                    for (let j = 0; j < i; j++) {
+                        steps[j].classList.add('done');
+                        steps[j].classList.remove('active');
+                    }
+                    steps[i].classList.add('active');
+                    steps[i].classList.remove('done');
+                    activeFound = true;
+                }
+            });
+        }
+
+        function showCompleted() {
+            const statusDot = document.getElementById('statusDot');
+            const progressFill = document.getElementById('progressFill');
+
+            statusDot.classList.add('completed');
+            progressFill.classList.add('completed');
+            document.getElementById('statusText').textContent = 'Completed!';
+
+            // Mark all steps as done
+            document.querySelectorAll('.step-tag').forEach(s => {
+                s.classList.add('done');
+                s.classList.remove('active');
+            });
+
+            // Show result card
+            const resultCard = document.getElementById('resultCard');
+            resultCard.classList.add('active');
+
+            const downloadBtn = document.getElementById('downloadBtn');
+            downloadBtn.href = `/download/${currentJobId}`;
+        }
+
+        function showError(message) {
+            const statusDot = document.getElementById('statusDot');
+            statusDot.classList.add('failed');
+            document.getElementById('statusText').textContent = 'Failed';
+            document.getElementById('progressDetail').textContent = message;
+        }
+    </script>
+</body>
+</html>
