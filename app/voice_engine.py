@@ -1,19 +1,22 @@
 """
-Voice Engine Module
-Uses pyttsx3 (offline Windows SAPI voices) for distinct male/female voices.
-Falls back to gTTS (Google) if SAPI voices unavailable.
+Voice Engine Module — Powered by Chatterbox TTS (Resemble AI)
+Uses HuggingFace Inference API with robust retry/queue handling.
 
-- David = deep male voice (narrator/dialogue)
-- Zira = female voice (narrator/dialogue)
-- Rate/volume adjustments for emotional expression
+Features:
+- Voice cloning from reference clips via Chatterbox
+- Each CHARACTER gets a unique voice profile (exaggeration, temperature, cfg)
+- Smart retry with exponential backoff when queue is full
+- Fallback chain: Chatterbox → pyttsx3 (local) → gTTS (Google)
+- POV-aware narrator gender
 """
 
 import os
-import tempfile
 import shutil
+import tempfile
+import time
 import pyttsx3
 from pydub import AudioSegment
-import threading
+from gradio_client import Client, handle_file
 
 
 # ══════════════════════════════════════════════════════════
@@ -51,50 +54,134 @@ _find_ffmpeg()
 
 
 # ══════════════════════════════════════════════════════════
-# TTS ENGINE SETUP
+# VOICE REFERENCE CLIPS
 # ══════════════════════════════════════════════════════════
 
-# Thread lock — pyttsx3 is NOT thread-safe
-_tts_lock = threading.Lock()
+VOICES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "voices")
 
-# Discover available SAPI voices once at startup
-_voice_ids = {}
-try:
-    _engine = pyttsx3.init()
-    _voices = _engine.getProperty('voices')
-    for v in _voices:
-        name_lower = v.name.lower()
-        if 'david' in name_lower:
-            _voice_ids['male'] = v.id
-        elif 'zira' in name_lower:
-            _voice_ids['female'] = v.id
-    _engine.stop()
-    del _engine
-    print(f"  SAPI voices found: {list(_voice_ids.keys())}")
-except Exception as e:
-    print(f"  pyttsx3 init warning: {e}")
+# Default reference audio
+_DEFAULT_REF = "https://github.com/gradio-app/gradio/raw/main/test/test_files/audio_sample.wav"
 
-# Base speaking rate (words per minute)
-BASE_RATE = 175
+
+def _get_voice_ref(voice_name: str):
+    """Get voice reference — checks local files first, then uses default."""
+    if os.path.exists(VOICES_DIR):
+        for ext in [".wav", ".mp3", ".flac"]:
+            path = os.path.join(VOICES_DIR, f"{voice_name}{ext}")
+            if os.path.exists(path):
+                return handle_file(path)
+    return handle_file(_DEFAULT_REF)
 
 
 # ══════════════════════════════════════════════════════════
-# EMOTION → VOICE ADJUSTMENTS
+# CHATTERBOX API CLIENT — with retry logic
 # ══════════════════════════════════════════════════════════
 
-EMOTION_SETTINGS = {
-    "neutral":     {"rate_mult": 1.0,  "vol": 1.0},
-    "anger":       {"rate_mult": 1.15, "vol": 1.0},
-    "sadness":     {"rate_mult": 0.85, "vol": 0.8},
-    "love":        {"rate_mult": 0.90, "vol": 0.85},
-    "fear":        {"rate_mult": 1.10, "vol": 0.75},
-    "excitement":  {"rate_mult": 1.20, "vol": 1.0},
-    "humor":       {"rate_mult": 1.05, "vol": 0.95},
-    "suspense":    {"rate_mult": 0.80, "vol": 0.85},
-    "frustration": {"rate_mult": 1.10, "vol": 1.0},
-    "surprise":    {"rate_mult": 1.15, "vol": 1.0},
-    "self-doubt":  {"rate_mult": 0.90, "vol": 0.8},
-}
+_client = None
+_client_failed = False
+_consecutive_failures = 0
+_MAX_CONSECUTIVE_FAILURES = 10  # After this many, switch to fallback for a while
+_last_failure_time = 0
+_COOLDOWN_SECONDS = 120  # Wait 2 min before retrying after too many failures
+
+
+def _get_client():
+    """Get or create the Chatterbox Gradio client with smart reconnection."""
+    global _client, _client_failed, _consecutive_failures, _last_failure_time
+
+    # If we've had too many failures, wait for cooldown
+    if _client_failed and _consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+        elapsed = time.time() - _last_failure_time
+        if elapsed < _COOLDOWN_SECONDS:
+            return None
+        else:
+            # Cooldown expired, try again
+            print(f"  Chatterbox: Cooldown expired, retrying connection...")
+            _client_failed = False
+            _client = None
+            _consecutive_failures = 0
+
+    if _client is not None:
+        return _client
+
+    try:
+        _client = Client("ResembleAI/Chatterbox")
+        print("  Chatterbox TTS: Connected to HuggingFace!")
+        _consecutive_failures = 0
+        return _client
+    except Exception as e:
+        print(f"  Chatterbox connection failed: {e}")
+        _client_failed = True
+        _last_failure_time = time.time()
+        return None
+
+
+# ══════════════════════════════════════════════════════════
+# PER-CHARACTER VOICE PROFILES
+# Each character gets unique Chatterbox settings so they sound different!
+# We vary: exaggeration (expressiveness), temperature (variation),
+# and cfg (guidance) to make each character's voice distinct.
+# ══════════════════════════════════════════════════════════
+
+# 20 unique voice profiles — applied per character_voice_id
+_CHARACTER_PROFILES = [
+    # (exaggeration, temperature, cfg_weight)  — voice #0 = narrator
+    (0.40, 0.70, 0.50),   # 0: Narrator — balanced, neutral
+    (0.35, 0.65, 0.55),   # 1: Calm, steady
+    (0.50, 0.75, 0.45),   # 2: Expressive, warm
+    (0.30, 0.60, 0.60),   # 3: Reserved, precise
+    (0.60, 0.80, 0.40),   # 4: Animated, lively
+    (0.25, 0.55, 0.65),   # 5: Quiet, measured
+    (0.55, 0.85, 0.35),   # 6: Bold, dramatic
+    (0.45, 0.70, 0.50),   # 7: Smooth, natural
+    (0.65, 0.75, 0.45),   # 8: Energetic, bright
+    (0.20, 0.50, 0.70),   # 9: Soft-spoken, gentle
+    (0.70, 0.90, 0.30),   # 10: Very expressive, theatrical
+    (0.38, 0.68, 0.52),   # 11: Slightly warm
+    (0.52, 0.72, 0.48),   # 12: Slightly bold
+    (0.28, 0.58, 0.62),   # 13: Understated
+    (0.58, 0.82, 0.38),   # 14: Vivid
+    (0.42, 0.62, 0.55),   # 15: Controlled
+    (0.48, 0.78, 0.42),   # 16: Free-flowing
+    (0.32, 0.66, 0.58),   # 17: Composed
+    (0.62, 0.88, 0.32),   # 18: Passionate
+    (0.22, 0.52, 0.68),   # 19: Subdued
+]
+
+
+def _get_character_settings(voice_id: int, emotion: str) -> dict:
+    """
+    Get Chatterbox TTS settings for a specific character + emotion.
+    Each character has a unique base profile, then emotion modifies it.
+    """
+    # Get base profile for this character
+    idx = voice_id % len(_CHARACTER_PROFILES)
+    base_exag, base_temp, base_cfg = _CHARACTER_PROFILES[idx]
+
+    # Emotion modifiers (added on top of character base)
+    emotion_mods = {
+        "neutral":    (0.0,  0.0,  0.0),
+        "anger":      (+0.25, +0.15, -0.15),
+        "sadness":    (+0.10, -0.10, -0.05),
+        "love":       (+0.10, -0.05, +0.05),
+        "fear":       (+0.20, +0.10, -0.15),
+        "excitement": (+0.20, +0.15, -0.10),
+        "humor":      (+0.15, +0.10, +0.00),
+        "suspense":   (+0.05, +0.05, -0.15),
+    }
+
+    mod = emotion_mods.get(emotion, (0.0, 0.0, 0.0))
+
+    return {
+        "exaggeration": max(0.0, min(1.0, base_exag + mod[0])),
+        "temperature":  max(0.1, min(1.0, base_temp + mod[1])),
+        "cfg":          max(0.1, min(1.0, base_cfg  + mod[2])),
+    }
+
+
+# ══════════════════════════════════════════════════════════
+# VOICE NAME SELECTION
+# ══════════════════════════════════════════════════════════
 
 STYLE_VOLUME_DB = {
     "normal": 0, "whisper": -8, "shout": +5, "trembling": -4,
@@ -102,72 +189,159 @@ STYLE_VOLUME_DB = {
 }
 
 
-def get_voice_gender(segment: dict) -> str:
-    """Determine which voice gender to use for a segment."""
+def get_voice_name(segment: dict) -> str:
+    """
+    Map segment to a voice reference name.
+    Each character type gets a unique voice reference clip.
+    """
     gender = segment.get("speaker_gender", "narrator")
     seg_type = segment.get("type", "narration")
+    style = segment.get("speaking_style", "normal")
 
-    # Dialogue: use speaker gender
-    if seg_type == "dialogue":
-        if gender == "female":
-            return "female"
-        elif gender == "male":
-            return "male"
-        # Unknown gender → use POV
+    # NARRATION — use POV narrator voice
+    if seg_type == "narration" or gender == "narrator":
         pov = segment.get("pov_gender", "male")
-        return pov
+        return f"narrator_{pov}"
 
-    # Narration: use POV gender
+    # DIALOGUE
+    if gender == "female":
+        if style in ["whisper", "seductive", "trembling"]:
+            return "female_soft"
+        elif style in ["shout", "cold"]:
+            return "female_strong"
+        return "female_lead"
+
+    if gender == "male":
+        if style in ["shout", "cold"]:
+            return "male_strong"
+        return "male_lead"
+
     pov = segment.get("pov_gender", "male")
-    return pov
+    return f"narrator_{pov}"
 
 
-def generate_speech_pyttsx3(text: str, gender: str, emotion: str = "neutral") -> AudioSegment:
-    """Generate speech using pyttsx3 (Windows SAPI voices)."""
+# ══════════════════════════════════════════════════════════
+# TTS GENERATION — Chatterbox with retry
+# ══════════════════════════════════════════════════════════
+
+_RETRY_DELAYS = [5, 10, 20, 30]  # Seconds to wait between retries
+
+
+def generate_speech_chatterbox(text: str, voice_name: str,
+                                emotion: str = "neutral",
+                                voice_id: int = 0) -> AudioSegment:
+    """Generate speech using Chatterbox TTS with retry on queue full."""
+    global _consecutive_failures, _last_failure_time
+
     text = text.strip()
     if len(text) < 2:
         return AudioSegment.silent(duration=300)
 
-    voice_id = _voice_ids.get(gender, _voice_ids.get("male") or _voice_ids.get("female"))
-    if not voice_id:
-        return _generate_speech_gtts(text)
+    client = _get_client()
+    if client is None:
+        return _generate_fallback(text)
 
-    settings = EMOTION_SETTINGS.get(emotion, EMOTION_SETTINGS["neutral"])
-    rate = int(BASE_RATE * settings["rate_mult"])
-    volume = settings["vol"]
+    # Get per-character settings
+    settings = _get_character_settings(voice_id, emotion)
+    voice_ref = _get_voice_ref(voice_name)
 
-    temp_file = tempfile.mktemp(suffix=".wav")
+    # Try with retries
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        try:
+            result = client.predict(
+                text_input=text,
+                audio_prompt_path_input=voice_ref,
+                exaggeration_input=settings["exaggeration"],
+                temperature_input=settings["temperature"],
+                cfgw_input=settings["cfg"],
+                api_name="/generate_tts_audio"
+            )
 
+            if not result or not os.path.exists(result):
+                print(f"  Chatterbox: no output for '{text[:30]}...'")
+                return _generate_fallback(text)
+
+            audio = AudioSegment.from_wav(result)
+            _consecutive_failures = 0  # Reset on success
+            return audio
+
+        except Exception as e:
+            error_msg = str(e).lower()
+            is_queue_error = ("queue" in error_msg or "exceeded" in error_msg
+                              or "503" in error_msg or "too many" in error_msg)
+
+            if is_queue_error and attempt < len(_RETRY_DELAYS):
+                delay = _RETRY_DELAYS[attempt]
+                print(f"  Chatterbox queue full — waiting {delay}s before retry "
+                      f"({attempt + 1}/{len(_RETRY_DELAYS)})...")
+                time.sleep(delay)
+                # Reconnect client in case the Space restarted
+                if attempt >= 2:
+                    global _client
+                    _client = None
+                    client = _get_client()
+                    if client is None:
+                        break
+                continue
+            else:
+                _consecutive_failures += 1
+                _last_failure_time = time.time()
+                if is_queue_error:
+                    print(f"  Chatterbox queue full after {attempt + 1} attempts, "
+                          f"using fallback (failures: {_consecutive_failures}/"
+                          f"{_MAX_CONSECUTIVE_FAILURES})")
+                else:
+                    print(f"  Chatterbox error: {str(e)[:80]}")
+                return _generate_fallback(text)
+
+    return _generate_fallback(text)
+
+
+def _generate_fallback(text: str) -> AudioSegment:
+    """Fallback chain: pyttsx3 (local) → gTTS (Google) → silence."""
+    # Try pyttsx3 first (local, no internet needed)
     try:
-        with _tts_lock:
-            engine = pyttsx3.init()
-            engine.setProperty('voice', voice_id)
-            engine.setProperty('rate', rate)
-            engine.setProperty('volume', volume)
-            engine.save_to_file(text, temp_file)
-            engine.runAndWait()
-            engine.stop()
-            del engine
+        audio = _generate_speech_pyttsx3(text)
+        if audio and len(audio) > 100:
+            return audio
+    except Exception:
+        pass
+
+    # Then gTTS
+    try:
+        return _generate_speech_gtts(text)
+    except Exception as e:
+        print(f"  All TTS fallbacks failed: {e}")
+        return AudioSegment.silent(duration=500)
+
+
+def _generate_speech_pyttsx3(text: str) -> AudioSegment:
+    """Local fallback using Windows SAPI voices."""
+    try:
+        engine = pyttsx3.init()
+        engine.setProperty("rate", 165)
+        engine.setProperty("volume", 0.9)
+        temp_file = tempfile.mktemp(suffix=".wav")
+        engine.save_to_file(text, temp_file)
+        engine.runAndWait()
+        engine.stop()
 
         if not os.path.exists(temp_file) or os.path.getsize(temp_file) < 100:
-            return AudioSegment.silent(duration=500)
+            return _generate_speech_gtts(text)
 
         audio = AudioSegment.from_wav(temp_file)
+        try:
+            os.remove(temp_file)
+        except OSError:
+            pass
         return audio
-
     except Exception as e:
-        print(f"  TTS error: {e}")
-        return AudioSegment.silent(duration=500)
-    finally:
-        if os.path.exists(temp_file):
-            try:
-                os.remove(temp_file)
-            except OSError:
-                pass
+        print(f"  pyttsx3 fallback error: {e}")
+        return _generate_speech_gtts(text)
 
 
 def _generate_speech_gtts(text: str) -> AudioSegment:
-    """Fallback: Google TTS (requires internet, one voice only)."""
+    """Last resort: Google TTS."""
     try:
         from gtts import gTTS
         temp_file = tempfile.mktemp(suffix=".mp3")
@@ -181,20 +355,18 @@ def _generate_speech_gtts(text: str) -> AudioSegment:
         return AudioSegment.silent(duration=500)
 
 
+# ══════════════════════════════════════════════════════════
+# PUBLIC API — used by audio_assembler
+# ══════════════════════════════════════════════════════════
+
 def generate_speech(text, voice=None, emotion="neutral", speaking_style="normal"):
-    """Generate speech — main entry point."""
+    """Generate speech — used by audio_assembler for headings."""
     text = text.strip()
     if len(text) < 2:
         return AudioSegment.silent(duration=300)
 
-    gender = "male"
-    if voice and ("jenny" in voice.lower() or "aria" in voice.lower() or
-                  "michelle" in voice.lower() or "sara" in voice.lower()):
-        gender = "female"
+    audio = generate_speech_chatterbox(text, "narrator_female", emotion, voice_id=0)
 
-    audio = generate_speech_pyttsx3(text, gender, emotion)
-
-    # Apply style volume
     vol = STYLE_VOLUME_DB.get(speaking_style, 0)
     if vol != 0:
         audio = audio + vol
@@ -205,16 +377,17 @@ def generate_speech(text, voice=None, emotion="neutral", speaking_style="normal"
 
 
 def generate_segment_audio(segment: dict) -> AudioSegment:
-    """Generate audio for a fully analyzed segment."""
+    """Generate audio for a fully analyzed segment with character-specific voice."""
     text = segment.get("text", "").strip()
     if not text or len(text) < 2:
         return AudioSegment.silent(duration=200)
 
-    gender = get_voice_gender(segment)
+    voice_name = get_voice_name(segment)
     emotion = segment.get("emotion", "neutral")
     style = segment.get("speaking_style", "normal")
+    voice_id = segment.get("character_voice_id", 0)
 
-    audio = generate_speech_pyttsx3(text, gender, emotion)
+    audio = generate_speech_chatterbox(text, voice_name, emotion, voice_id)
 
     vol = STYLE_VOLUME_DB.get(style, 0)
     if vol != 0:
@@ -234,7 +407,6 @@ def detect_paragraph_pov(paragraph: dict) -> str:
     segments = paragraph.get("segments", [])
     full_text = paragraph.get("text", "").lower()
 
-    # Narrator describes male → POV is female
     female_pov_cues = [
         "his eyes", "his jaw", "his hand", "his chest", "his voice",
         "his smile", "his lips", "his arms", "his face", "his gaze",
@@ -242,7 +414,6 @@ def detect_paragraph_pov(paragraph: dict) -> str:
         "he asked", "he replied", "he looked", "he was",
         "handsome", "he pulled me", "he kissed",
     ]
-    # Narrator describes female → POV is male
     male_pov_cues = [
         "her eyes", "her lips", "her hair", "her smile", "her face",
         "her voice", "her hand", "her dress", "her scent", "her body",
@@ -274,7 +445,6 @@ def detect_paragraph_pov(paragraph: dict) -> str:
     elif male_score > female_score:
         return "male"
 
-    # Default: alternate
     idx = paragraph.get("paragraph_index", 0)
     return "female" if idx % 2 == 0 else "male"
 

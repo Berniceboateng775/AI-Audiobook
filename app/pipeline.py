@@ -1,7 +1,7 @@
 """
 Pipeline Orchestrator
 Runs the full end-to-end audiobook generation pipeline:
-PDF → Text → Analysis (Groq) → Voice (edge-tts) → Sound → Final Audio
+PDF → Text → Analysis (Ollama) → Voice (pyttsx3) → Sound → Final Audio
 """
 
 import os
@@ -10,7 +10,7 @@ import time
 from app.pdf_extractor import extract_text, get_pdf_metadata
 from app.text_cleaner import process_text
 from app.dialogue_detector import process_paragraphs
-from app.llm_analyzer import analyze_all_segments, check_groq_status
+from app.llm_analyzer import analyze_all_segments, check_ollama_status
 from app.audio_assembler import assemble_audiobook
 from app.voice_engine import assign_pov_to_segments
 
@@ -22,7 +22,7 @@ OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output")
 def process_book(
     pdf_path: str,
     output_filename: str | None = None,
-    model: str = "llama-3.3-70b-versatile",
+    model: str = "mistral",
     use_llm: bool = True,
     output_format: str = "mp3"
 ) -> str:
@@ -32,7 +32,7 @@ def process_book(
     Args:
         pdf_path: Path to the PDF storybook
         output_filename: Custom output filename (optional)
-        model: Groq model for text analysis
+        model: Ollama model for text analysis
         use_llm: Whether to use LLM for analysis (False = rule-based only)
         output_format: Output audio format ("mp3" or "wav")
         
@@ -42,7 +42,7 @@ def process_book(
     start_time = time.time()
 
     print("=" * 60)
-    print("AI CINEMATIC AUDIOBOOK ENGINE")
+    print("AI CINEMATIC AUDIOBOOK ENGINE (Local Mode)")
     print("=" * 60)
 
     # ── STEP 1: Extract PDF ──────────────────────────────────
@@ -71,21 +71,21 @@ def process_book(
     narration_count = total_segments - dialogue_count
     print(f"  {dialogue_count} dialogue segments, {narration_count} narration segments")
 
-    # ── STEP 4: LLM Analysis (Groq) ─────────────────────────
+    # ── STEP 4: LLM Analysis (Ollama) ────────────────────────
     if use_llm:
-        print("\nSTEP 4: Analyzing emotions and characters (Groq)...")
-        if check_groq_status():
+        print(f"\nSTEP 4: Analyzing characters & emotions (Ollama — {model})...")
+        if check_ollama_status():
             paragraphs = analyze_all_segments(paragraphs, model)
         else:
-            print("  Groq not available — using rule-based fallback")
-            from app.llm_analyzer import apply_fallback_analysis
+            print("  Ollama not available — using rule-based analysis")
+            from app.llm_analyzer import apply_rule_based_analysis
             for p in paragraphs:
-                p["segments"] = [apply_fallback_analysis(s) for s in p["segments"]]
+                p["segments"] = [apply_rule_based_analysis(s) for s in p["segments"]]
     else:
         print("\nSTEP 4: Using rule-based analysis (LLM disabled)...")
-        from app.llm_analyzer import apply_fallback_analysis
+        from app.llm_analyzer import apply_rule_based_analysis
         for p in paragraphs:
-            p["segments"] = [apply_fallback_analysis(s) for s in p["segments"]]
+            p["segments"] = [apply_rule_based_analysis(s) for s in p["segments"]]
 
     # Print analysis summary
     emotions = {}
@@ -108,7 +108,7 @@ def process_book(
     print(f"  POV distribution: {pov_counts}")
 
     # ── STEP 5 & 6: Generate Audio ──────────────────────────
-    print("\nSTEP 5: Generating voices and assembling audio...")
+    print("\nSTEP 5: Generating voices (pyttsx3) and assembling audio...")
 
     # Determine output path
     if output_filename is None:
@@ -153,12 +153,12 @@ def quick_test(pdf_path: str, max_paragraphs: int = 3) -> str:
     paragraphs = process_text(raw_text)[:max_paragraphs]
     paragraphs = process_paragraphs(paragraphs)
 
-    if check_groq_status():
+    if check_ollama_status():
         paragraphs = analyze_all_segments(paragraphs)
     else:
-        from app.llm_analyzer import apply_fallback_analysis
+        from app.llm_analyzer import apply_rule_based_analysis
         for p in paragraphs:
-            p["segments"] = [apply_fallback_analysis(s) for s in p["segments"]]
+            p["segments"] = [apply_rule_based_analysis(s) for s in p["segments"]]
 
     # Assign narrator POV gender
     paragraphs = assign_pov_to_segments(paragraphs)

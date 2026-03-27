@@ -1,28 +1,74 @@
 """
-LLM Analyzer Module
+LLM Analyzer Module — Powered by Ollama (Mistral)
 Smart hybrid approach:
 1. Rule-based analysis handles MOST segments (instant, free, no API)
-2. Groq LLM only used for ambiguous dialogue (unknown gender/emotion)
+2. Ollama LLM used for ambiguous dialogue (character names, gender, emotion)
 
-This way a 578-page book uses minimal API tokens.
+Detects individual CHARACTER NAMES so each character gets a unique voice.
 """
 
 import os
 import json
 import re
 import time
-from groq import Groq
+import requests
 
-# Groq API setup
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-DEFAULT_MODEL = "llama-3.1-8b-instant"  # Smaller model = fewer tokens used
+# Ollama setup (local)
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral")
+
+# Character registry — tracks all discovered characters across the book
+# Maps character name → {"gender": "male"/"female", "voice_id": int}
+_character_registry: dict[str, dict] = {}
+_male_count = 0
+_female_count = 0
 
 
-def get_client() -> Groq:
-    """Get Groq client with API key."""
-    if not GROQ_API_KEY:
-        return None
-    return Groq(api_key=GROQ_API_KEY)
+def reset_character_registry():
+    """Reset character tracking (call before each new book)."""
+    global _character_registry, _male_count, _female_count
+    _character_registry = {}
+    _male_count = 0
+    _female_count = 0
+
+
+def get_character_registry() -> dict:
+    """Get the current character registry."""
+    return _character_registry.copy()
+
+
+def register_character(name: str, gender: str) -> dict:
+    """
+    Register a character and assign a unique voice ID.
+    Returns the character's voice info.
+    """
+    global _male_count, _female_count
+
+    name = name.strip().title()
+    if not name or name in ("Narrator", "Unknown", "None"):
+        return {"gender": "narrator", "voice_id": 0, "name": "Narrator"}
+
+    if name in _character_registry:
+        return _character_registry[name]
+
+    gender = gender.lower()
+    if gender not in ("male", "female"):
+        gender = "male"  # default
+
+    if gender == "male":
+        _male_count += 1
+        voice_id = _male_count
+    else:
+        _female_count += 1
+        voice_id = _female_count
+
+    _character_registry[name] = {
+        "gender": gender,
+        "voice_id": voice_id,
+        "name": name
+    }
+    print(f"    New character: {name} ({gender}, voice #{voice_id})")
+    return _character_registry[name]
 
 
 # ══════════════════════════════════════════════════════════
@@ -33,16 +79,44 @@ def apply_rule_based_analysis(segment: dict) -> dict:
     """
     Comprehensive rule-based analysis — no API needed.
     Handles emotion, speaking style, scene mood, and gender detection.
-    Works great for fiction/romance novels.
+    Also tries to extract character names from attribution tags.
     """
     text = segment["text"].lower()
+    original_text = segment.get("text", "")
     result = {
         "speaker_gender": segment.get("speaker_gender", "narrator"),
+        "speaker_name": segment.get("speaker_name", ""),
         "emotion": "neutral",
         "emotion_intensity": "medium",
         "scene_mood": "calm",
         "speaking_style": "normal"
     }
+
+    # ── CHARACTER NAME EXTRACTION FROM ATTRIBUTION ────────
+    # Match patterns like: "said John", "Mary whispered", "cried Elizabeth"
+    attribution = segment.get("attribution", "")
+    if attribution:
+        # Extract name from attribution: "said John" / "John said"
+        name_match = re.search(
+            r'(?:said|asked|replied|whispered|shouted|yelled|murmured|cried|'
+            r'exclaimed|snapped|growled|snarled|laughed|screamed|demanded|'
+            r'pleaded|begged|called|answered|continued|added|muttered|'
+            r'breathed|sighed|groaned|hissed|roared|bellowed)\s+'
+            r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
+            attribution, re.IGNORECASE
+        )
+        if not name_match:
+            # Try "Name said" pattern
+            name_match = re.search(
+                r'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+'
+                r'(?:said|asked|replied|whispered|shouted|yelled|murmured|'
+                r'cried|exclaimed|snapped|growled|snarled|laughed|screamed|'
+                r'demanded|pleaded|begged|called|answered|continued|added|'
+                r'muttered|breathed|sighed|groaned|hissed|roared|bellowed)',
+                attribution
+            )
+        if name_match:
+            result["speaker_name"] = name_match.group(1).strip()
 
     # ── EMOTION DETECTION ────────────────────────────────
     emotion_rules = {
@@ -127,15 +201,18 @@ def apply_rule_based_analysis(segment: dict) -> dict:
             break
 
     # ── GENDER (preserve existing or detect from text) ───
-    if result["speaker_gender"] == "unknown":
-        # Try to detect from the text itself
-        female_names_common = ["she", "her ", "herself", "woman", "girl", "lady",
-                              "mother", "sister", "daughter", "queen", "princess"]
-        male_names_common = ["he ", "him ", "his ", "himself", "man ", "boy",
-                            "gentleman", "father", "brother", "son", "king", "prince"]
+    if result["speaker_gender"] in ("unknown", "narrator") and segment.get("type") == "dialogue":
+        female_cues = ["she", "her ", "herself", "woman", "girl", "lady",
+                      "mother", "sister", "daughter", "queen", "princess",
+                      "mrs", "miss", "ms"]
+        male_cues = ["he ", "him ", "his ", "himself", "man ", "boy",
+                    "gentleman", "father", "brother", "son", "king", "prince",
+                    "mr ", "sir"]
 
-        female_score = sum(1 for w in female_names_common if w in text)
-        male_score = sum(1 for w in male_names_common if w in text)
+        # Check attribution text for gender clues
+        attr_text = (attribution + " " + text).lower()
+        female_score = sum(1 for w in female_cues if w in attr_text)
+        male_score = sum(1 for w in male_cues if w in attr_text)
 
         if female_score > male_score:
             result["speaker_gender"] = "female"
@@ -145,80 +222,135 @@ def apply_rule_based_analysis(segment: dict) -> dict:
     # For narration type, always set to narrator
     if segment.get("type") == "narration":
         result["speaker_gender"] = "narrator"
+        result["speaker_name"] = "Narrator"
+
+    # Register the character if we found a name
+    if result["speaker_name"] and result["speaker_name"] != "Narrator":
+        char_info = register_character(result["speaker_name"], result["speaker_gender"])
+        result["speaker_gender"] = char_info["gender"]
+        result["character_voice_id"] = char_info["voice_id"]
+    else:
+        result["character_voice_id"] = 0
 
     return {**segment, **result}
 
 
 # ══════════════════════════════════════════════════════════
-# LLM ANALYSIS (OPTIONAL — only for ambiguous segments)
+# OLLAMA LLM ANALYSIS (for ambiguous segments)
 # ══════════════════════════════════════════════════════════
 
-def analyze_with_llm(segments: list[dict], model: str = DEFAULT_MODEL) -> list[dict]:
+def _ollama_generate(prompt: str, system: str = "") -> str:
+    """Call Ollama's generate API."""
+    try:
+        payload = {
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "num_predict": 500,
+            }
+        }
+        if system:
+            payload["system"] = system
+
+        resp = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json=payload,
+            timeout=60
+        )
+        resp.raise_for_status()
+        return resp.json().get("response", "")
+    except Exception as e:
+        print(f"  Ollama error: {e}")
+        return ""
+
+
+def analyze_with_llm(segments: list[dict], book_context: str = "") -> list[dict]:
     """
-    Use Groq LLM for a small batch of ambiguous segments.
-    Only called for dialogue segments with unknown gender.
+    Use Ollama (Mistral) for a batch of ambiguous segments.
+    Focuses on identifying CHARACTER NAMES and gender.
     """
-    client = get_client()
-    if not client or not segments:
-        return [apply_rule_based_analysis(s) for s in segments]
+    if not segments:
+        return []
 
     segment_texts = []
     for i, seg in enumerate(segments):
-        segment_texts.append(f'{i}. "{seg["text"][:150]}"')
+        attr = seg.get("attribution", "")
+        text_preview = seg["text"][:200]
+        if attr:
+            segment_texts.append(f'{i}. Attribution: "{attr}" | Dialogue: "{text_preview}"')
+        else:
+            segment_texts.append(f'{i}. "{text_preview}"')
 
     batch_text = "\n".join(segment_texts)
 
-    prompt = f"""Analyze these {len(segments)} dialogue segments. Return ONLY a JSON array.
+    # Include known characters for context
+    known = list(_character_registry.keys())
+    known_str = f"\nKnown characters so far: {', '.join(known)}" if known else ""
+
+    prompt = f"""Analyze these {len(segments)} dialogue segments from a novel.
+For each, identify the CHARACTER NAME of who is speaking, their gender, and the emotion.
+{known_str}
 
 {batch_text}
 
-Return JSON array:
-[{{"speaker_gender":"male/female","emotion":"neutral/anger/sadness/love/fear/excitement/humor/suspense","speaking_style":"normal/whisper/shout/trembling/sarcastic/seductive/cold"}}]"""
+Return ONLY a JSON array with exactly {len(segments)} objects:
+[{{"speaker_name":"CharacterName","speaker_gender":"male/female","emotion":"neutral/anger/sadness/love/fear/excitement/humor/suspense","speaking_style":"normal/whisper/shout/trembling/sarcastic/seductive/cold","scene_mood":"calm/romantic/dramatic/suspense/humorous/action"}}]
 
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "Return ONLY valid JSON arrays."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.1,
-            max_tokens=800
-        )
+Rules:
+- Use the character's actual NAME (e.g. "Elizabeth", "James"), not generic labels
+- If you can't determine the name, use "Unknown"
+- Infer gender from the name and context clues
+- Return ONLY valid JSON, no other text"""
 
-        result_text = response.choices[0].message.content
-        analyses = parse_batch_response(result_text, len(segments))
+    system = "You are a literary analysis assistant. Return ONLY valid JSON arrays. Never include explanations."
 
-        enriched = []
-        for seg, analysis in zip(segments, analyses):
-            merged = {**seg, **analysis}
-            if "scene_mood" not in merged:
-                merged["scene_mood"] = "calm"
-            if "emotion_intensity" not in merged:
-                merged["emotion_intensity"] = "medium"
-            enriched.append(merged)
-        return enriched
-
-    except Exception as e:
-        print(f"  LLM failed (using rules): {e}")
+    result_text = _ollama_generate(prompt, system)
+    if not result_text:
         return [apply_rule_based_analysis(s) for s in segments]
+
+    analyses = parse_batch_response(result_text, len(segments))
+
+    enriched = []
+    for seg, analysis in zip(segments, analyses):
+        merged = {**seg, **analysis}
+
+        # Set defaults for missing fields
+        if "scene_mood" not in merged:
+            merged["scene_mood"] = "calm"
+        if "emotion_intensity" not in merged:
+            merged["emotion_intensity"] = "medium"
+
+        # Register discovered character
+        name = merged.get("speaker_name", "")
+        gender = merged.get("speaker_gender", "unknown")
+        if name and name not in ("Unknown", "Narrator", "None", "unknown"):
+            char_info = register_character(name, gender)
+            merged["speaker_gender"] = char_info["gender"]
+            merged["character_voice_id"] = char_info["voice_id"]
+        else:
+            merged["character_voice_id"] = 0
+
+        enriched.append(merged)
+    return enriched
 
 
 def parse_batch_response(response_text: str, expected_count: int) -> list[dict]:
     """Parse JSON array from LLM response."""
     text = response_text.strip()
 
-    for attempt in [text]:
-        try:
-            result = json.loads(attempt)
-            if isinstance(result, list):
-                while len(result) < expected_count:
-                    result.append(get_defaults())
-                return result[:expected_count]
-        except json.JSONDecodeError:
-            pass
+    # Try direct parse
+    try:
+        result = json.loads(text)
+        if isinstance(result, list):
+            while len(result) < expected_count:
+                result.append(get_defaults())
+            return result[:expected_count]
+    except json.JSONDecodeError:
+        pass
 
-    # Try extracting from code blocks
+    # Try extracting JSON array from text
     match = re.search(r'\[.*\]', text, re.DOTALL)
     if match:
         try:
@@ -235,11 +367,13 @@ def parse_batch_response(response_text: str, expected_count: int) -> list[dict]:
 
 def get_defaults() -> dict:
     return {
+        "speaker_name": "Unknown",
         "speaker_gender": "narrator",
         "emotion": "neutral",
         "emotion_intensity": "medium",
         "scene_mood": "calm",
-        "speaking_style": "normal"
+        "speaking_style": "normal",
+        "character_voice_id": 0,
     }
 
 
@@ -247,75 +381,88 @@ def get_defaults() -> dict:
 # MAIN ANALYSIS FUNCTION
 # ══════════════════════════════════════════════════════════
 
-def analyze_all_segments(paragraphs: list[dict], model: str = DEFAULT_MODEL) -> list[dict]:
+def analyze_all_segments(paragraphs: list[dict], model: str = OLLAMA_MODEL) -> list[dict]:
     """
     Smart hybrid analysis:
     1. Apply rule-based analysis to ALL segments (instant)
-    2. Send ONLY ambiguous dialogue to Groq (saves tokens)
+    2. Send ONLY ambiguous dialogue to Ollama (saves resources)
     """
+    global OLLAMA_MODEL
+    OLLAMA_MODEL = model
+
+    # Reset character registry for each new book
+    reset_character_registry()
+
     total = sum(len(p.get("segments", [])) for p in paragraphs)
     print(f"  Analyzing {total} segments (rule-based first)...")
 
     # Step 1: Rule-based analysis for everything
-    ambiguous = []  # (paragraph_idx, segment_idx) for unknown gender dialogues
-    
+    ambiguous = []  # (paragraph_idx, segment_idx)
+
     for p_idx, paragraph in enumerate(paragraphs):
         for s_idx, segment in enumerate(paragraph.get("segments", [])):
             enriched = apply_rule_based_analysis(segment)
             paragraph["segments"][s_idx] = enriched
 
-            # Track ambiguous dialogues for optional LLM pass
-            if (enriched.get("type") == "dialogue" and 
-                enriched.get("speaker_gender") in ("unknown", "narrator")):
+            # Track ambiguous dialogues for optional Ollama pass
+            if (enriched.get("type") == "dialogue" and
+                (enriched.get("speaker_name", "") in ("", "Unknown") or
+                 enriched.get("speaker_gender") in ("unknown", "narrator"))):
                 ambiguous.append((p_idx, s_idx))
 
     print(f"  Rule-based: Done! ({total} segments analyzed instantly)")
+    print(f"  Characters found (rule-based): {len(_character_registry)}")
+    for name, info in _character_registry.items():
+        print(f"    • {name} ({info['gender']}, voice #{info['voice_id']})")
     print(f"  Ambiguous dialogues needing LLM: {len(ambiguous)}")
 
-    # Step 2: Use Groq only for ambiguous segments (if available)
-    if ambiguous and GROQ_API_KEY:
-        print(f"  Sending {len(ambiguous)} ambiguous segments to Groq...")
-        
-        BATCH = 20
+    # Step 2: Use Ollama only for ambiguous segments
+    if ambiguous and check_ollama_status():
+        print(f"  Sending {len(ambiguous)} ambiguous segments to Ollama ({OLLAMA_MODEL})...")
+
+        BATCH = 10  # Smaller batches for local LLM
         for i in range(0, len(ambiguous), BATCH):
             batch_indices = ambiguous[i:i + BATCH]
             batch_segments = [
-                paragraphs[p_idx]["segments"][s_idx] 
+                paragraphs[p_idx]["segments"][s_idx]
                 for p_idx, s_idx in batch_indices
             ]
 
-            enriched = analyze_with_llm(batch_segments, model)
+            enriched = analyze_with_llm(batch_segments)
 
             for (p_idx, s_idx), seg in zip(batch_indices, enriched):
                 paragraphs[p_idx]["segments"][s_idx] = seg
 
             done = min(i + BATCH, len(ambiguous))
-            print(f"  LLM: {done}/{len(ambiguous)} ambiguous segments...")
+            print(f"  Ollama: {done}/{len(ambiguous)} ambiguous segments...")
 
-            # Small delay to avoid rate limits
-            if i + BATCH < len(ambiguous):
-                time.sleep(1)
-
+    # Final character summary
+    print(f"\n  === CHARACTER REGISTRY ({len(_character_registry)} characters) ===")
+    for name, info in _character_registry.items():
+        print(f"    {name}: {info['gender']} | voice #{info['voice_id']}")
     print(f"  Done analyzing all {total} segments!")
     return paragraphs
 
 
-def check_groq_status() -> bool:
-    """Check if Groq API is available."""
-    if not GROQ_API_KEY:
-        print("  No GROQ_API_KEY set — using rule-based analysis only (still works great!)")
-        return True  # We can still work with rule-based only
-
+def check_ollama_status() -> bool:
+    """Check if Ollama is running locally."""
     try:
-        client = get_client()
-        client.chat.completions.create(
-            model=DEFAULT_MODEL,
-            messages=[{"role": "user", "content": "ok"}],
-            max_tokens=5
-        )
-        print("  Groq API: Connected!")
-        return True
+        resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
+        resp.raise_for_status()
+        models = [m["name"] for m in resp.json().get("models", [])]
+        # Check if our model is available (handle tag suffixes like ":latest")
+        model_names = [m.split(":")[0] for m in models]
+        if OLLAMA_MODEL.split(":")[0] in model_names:
+            print(f"  Ollama: Connected! Model '{OLLAMA_MODEL}' ready.")
+            return True
+        else:
+            print(f"  Ollama: Connected but '{OLLAMA_MODEL}' not found.")
+            print(f"  Available models: {models}")
+            print(f"  Run: ollama pull {OLLAMA_MODEL}")
+            print(f"  Using rule-based analysis only (still works great!)")
+            return False
     except Exception as e:
-        print(f"  Groq API unavailable: {e}")
-        print("  Falling back to rule-based analysis (still works great!)")
-        return True  # Don't block — rule-based is fine
+        print(f"  Ollama not running: {e}")
+        print(f"  Start it with: ollama serve")
+        print(f"  Using rule-based analysis only (still works great!)")
+        return False

@@ -1,11 +1,11 @@
 PyMuPDF
-spacy
 nltk
-edge-tts
 pydub
 fastapi
 uvicorn
 python-multipart
-requests
 jinja2
-groq
+pyttsx3
+requests
+gTTS
+gradio_client
