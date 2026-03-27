@@ -8,3 +8,4 @@ uvicorn
 python-multipart
 requests
 jinja2
+groq

@@ -20,7 +20,7 @@ The engine reads your story, detects characters and emotions, assigns unique mal
 |-----------|------|
 | PDF Extraction | PyMuPDF |
 | Text Cleaning | spaCy + NLTK |
-| LLM Analysis | Ollama (Mistral) |
+| LLM Analysis | Groq (Llama 3.3 — FREE cloud API) |
 | Text-to-Speech | edge-tts (Microsoft Neural Voices — FREE) |
 | Audio Processing | pydub + FFmpeg |
 | Web API | FastAPI |
@@ -29,7 +29,7 @@ The engine reads your story, detects characters and emotions, assigns unique mal
 ## Prerequisites
 
 - Python 3.10+
-- [Ollama](https://ollama.com) — for local LLM
+- [Groq API Key](https://console.groq.com/keys) — FREE, no payment needed
 - [FFmpeg](https://ffmpeg.org) — for audio processing
 
 ## Setup
@@ -49,8 +49,8 @@ python -m spacy download en_core_web_sm
 # 4. Download NLTK data
 python -c "import nltk; nltk.download('punkt_tab')"
 
-# 5. Pull Ollama model (make sure Ollama is running)
-ollama pull mistral
+# 5. Set your FREE Groq API key
+set GROQ_API_KEY=your_key_here
 
 # 6. (Optional) Add sound effects to sounds/ folder
 # Download free sounds from pixabay.com/sound-effects/

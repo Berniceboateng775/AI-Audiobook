@@ -1,25 +1,41 @@
 """
 LLM Analyzer Module
-Uses Ollama (local free LLM) to analyze text for:
+Uses Groq (free cloud LLM API) to analyze text for:
 - Character/speaker identification
 - Emotion detection
 - Scene mood classification
+
+Get your FREE API key at: https://console.groq.com/keys
 """
 
+import os
 import json
-import requests
+import re
+from groq import Groq
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-DEFAULT_MODEL = "mistral"
+# Groq API setup — set your key as environment variable or paste it below
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+DEFAULT_MODEL = "llama-3.3-70b-versatile"  # Free, fast, excellent quality
+
+
+def get_client() -> Groq:
+    """Get Groq client with API key."""
+    if not GROQ_API_KEY:
+        raise ValueError(
+            "GROQ_API_KEY not set!\n"
+            "Get your FREE key at: https://console.groq.com/keys\n"
+            "Then set it: set GROQ_API_KEY=your_key_here"
+        )
+    return Groq(api_key=GROQ_API_KEY)
 
 
 def analyze_segment(segment: dict, model: str = DEFAULT_MODEL) -> dict:
     """
-    Use Ollama LLM to analyze a text segment for emotion, speaker, and scene mood.
+    Use Groq LLM to analyze a text segment for emotion, speaker, and scene mood.
     
     Args:
         segment: Dict with 'type' and 'text' keys
-        model: Ollama model name (default: "mistral")
+        model: Groq model name
         
     Returns:
         Enriched segment dict with emotion, speaker_gender, and scene_mood
@@ -27,12 +43,12 @@ def analyze_segment(segment: dict, model: str = DEFAULT_MODEL) -> dict:
     text = segment["text"]
     segment_type = segment.get("type", "narration")
 
-    prompt = f"""You are a story analyzer. Analyze this text segment and return ONLY valid JSON.
+    prompt = f"""Analyze this story text segment and return ONLY valid JSON.
 
 Text: "{text}"
 Type: {segment_type}
 
-Return this exact JSON structure (no other text):
+Return this exact JSON structure (no other text, no markdown):
 {{
     "speaker_gender": "male" or "female" or "narrator",
     "emotion": one of ["neutral", "anger", "sadness", "love", "fear", "excitement", "humor", "suspense"],
@@ -44,26 +60,27 @@ Return this exact JSON structure (no other text):
 Rules:
 - For narration, speaker_gender is always "narrator"
 - Detect emotion from context, not just words
-- Be specific about speaking_style based on the text
-"""
+- Be specific about speaking_style based on the text"""
 
     try:
-        response = requests.post(
-            OLLAMA_URL,
-            json={
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.1,  # Low temperature for consistent output
-                    "num_predict": 200
+        client = get_client()
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a story text analyzer. Return ONLY valid JSON, no other text."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
                 }
-            },
-            timeout=30
+            ],
+            temperature=0.1,
+            max_tokens=200
         )
-        response.raise_for_status()
 
-        result_text = response.json().get("response", "")
+        result_text = response.choices[0].message.content
         analysis = parse_llm_response(result_text)
 
         # Merge LLM analysis with existing segment data
@@ -75,22 +92,15 @@ Rules:
 
         return enriched
 
-    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-        print(f"LLM analysis failed: {e}")
+    except Exception as e:
+        print(f"  LLM analysis failed: {e}")
         return apply_fallback_analysis(segment)
 
 
 def parse_llm_response(response_text: str) -> dict:
     """
     Parse JSON from LLM response, handling common formatting issues.
-    
-    Args:
-        response_text: Raw text response from Ollama
-        
-    Returns:
-        Parsed analysis dict
     """
-    # Try to find JSON in the response
     text = response_text.strip()
 
     # Try direct JSON parse
@@ -99,9 +109,7 @@ def parse_llm_response(response_text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # Try to extract JSON from markdown code block
-    json_match = None
-    import re
+    # Try to extract JSON from markdown code block or raw braces
     patterns = [
         r"```json\s*(.*?)\s*```",
         r"```\s*(.*?)\s*```",
@@ -116,19 +124,12 @@ def parse_llm_response(response_text: str) -> dict:
             except (json.JSONDecodeError, IndexError):
                 continue
 
-    # Return defaults if parsing fails
     return get_defaults()
 
 
 def apply_fallback_analysis(segment: dict) -> dict:
     """
     Apply simple rule-based analysis when LLM is unavailable.
-    
-    Args:
-        segment: Text segment dict
-        
-    Returns:
-        Segment with fallback analysis fields
     """
     text = segment["text"].lower()
     defaults = get_defaults()
@@ -181,14 +182,7 @@ def get_defaults() -> dict:
 
 def analyze_all_segments(paragraphs: list[dict], model: str = DEFAULT_MODEL) -> list[dict]:
     """
-    Analyze all segments across all paragraphs.
-    
-    Args:
-        paragraphs: List of paragraph dicts with 'segments' field
-        model: Ollama model name
-        
-    Returns:
-        Paragraphs with enriched segments
+    Analyze all segments across all paragraphs using Groq.
     """
     total_segments = sum(len(p.get("segments", [])) for p in paragraphs)
     processed = 0
@@ -209,24 +203,28 @@ def analyze_all_segments(paragraphs: list[dict], model: str = DEFAULT_MODEL) -> 
     return paragraphs
 
 
-def check_ollama_status(model: str = DEFAULT_MODEL) -> bool:
+def check_groq_status() -> bool:
     """
-    Check if Ollama is running and the model is available.
+    Check if Groq API key is set and working.
     
     Returns:
-        True if Ollama is ready, False otherwise
+        True if Groq is ready, False otherwise
     """
+    if not GROQ_API_KEY:
+        print("GROQ_API_KEY not set!")
+        print("Get your FREE key at: https://console.groq.com/keys")
+        print("Then run: set GROQ_API_KEY=your_key_here")
+        return False
+
     try:
-        response = requests.get("http://localhost:11434/api/tags", timeout=5)
-        if response.status_code == 200:
-            models = [m["name"] for m in response.json().get("models", [])]
-            # Check if any model name starts with the requested model
-            if any(model in m for m in models):
-                return True
-            else:
-                print(f"Model '{model}' not found. Available: {models}")
-                print(f"Run: ollama pull {model}")
-                return False
-    except requests.exceptions.RequestException:
-        print("Ollama is not running. Start it with: ollama serve")
+        client = get_client()
+        # Quick test with a tiny request
+        response = client.chat.completions.create(
+            model=DEFAULT_MODEL,
+            messages=[{"role": "user", "content": "Say 'ok'"}],
+            max_tokens=5
+        )
+        return True
+    except Exception as e:
+        print(f"Groq API error: {e}")
         return False
