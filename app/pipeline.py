@@ -13,6 +13,7 @@ from app.dialogue_detector import process_paragraphs
 from app.llm_analyzer import analyze_all_segments, check_groq_status
 from app.audio_assembler import assemble_audiobook
 from app.sound_effects import print_sound_setup_guide
+from app.voice_engine import assign_pov_to_segments
 
 
 # Default output directory
@@ -96,6 +97,17 @@ def process_book(
 
     print(f"  Emotion breakdown: {emotions}")
 
+    # ── STEP 4.5: Detect POV per paragraph ──────────────────
+    print("\nSTEP 4.5: Detecting narrator POV gender per paragraph...")
+    paragraphs = assign_pov_to_segments(paragraphs)
+    pov_counts = {"male": 0, "female": 0}
+    for p in paragraphs:
+        for s in p.get("segments", []):
+            pov = s.get("pov_gender", "male")
+            if pov in pov_counts:
+                pov_counts[pov] += 1
+    print(f"  POV distribution: {pov_counts}")
+
     # ── STEP 5 & 6: Generate Audio ──────────────────────────
     print("\nSTEP 5: Generating voices and assembling audio...")
 
@@ -148,6 +160,9 @@ def quick_test(pdf_path: str, max_paragraphs: int = 3) -> str:
         from app.llm_analyzer import apply_fallback_analysis
         for p in paragraphs:
             p["segments"] = [apply_fallback_analysis(s) for s in p["segments"]]
+
+    # Assign narrator POV gender
+    paragraphs = assign_pov_to_segments(paragraphs)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_path = os.path.join(OUTPUT_DIR, "test_output.mp3")

@@ -64,22 +64,31 @@ def get_pause_duration(current_segment: dict, previous_segment: dict | None) -> 
 def assemble_paragraph(paragraph: dict) -> AudioSegment:
     """
     Assemble audio for a single paragraph with all its segments.
-    
-    Args:
-        paragraph: Paragraph dict with 'segments' list
-        
-    Returns:
-        Combined AudioSegment for the paragraph
+    Handles headings, dialogue, and narration with proper pauses.
     """
     segments = paragraph.get("segments", [])
     if not segments:
         return AudioSegment.silent(duration=500)
 
+    # If this is a heading, read it with a warm voice and add pauses
+    if paragraph.get("is_heading"):
+        from app.voice_engine import generate_speech
+        heading_audio = generate_speech(
+            paragraph["text"],
+            voice="en-US-JennyNeural",  # Warm female voice for headings
+            emotion="neutral",
+            speaking_style="normal"
+        )
+        # Pause before and after heading
+        return (AudioSegment.silent(duration=1500) + 
+                heading_audio + 
+                AudioSegment.silent(duration=1200))
+
     combined = AudioSegment.empty()
     previous_segment = None
 
     for segment in segments:
-        # Skip segments that are just attribution narration (already part of the flow)
+        # Skip very short attribution fragments
         if segment.get("type") == "narration" and len(segment.get("text", "")) < 4:
             continue
 
@@ -100,8 +109,7 @@ def assemble_paragraph(paragraph: dict) -> AudioSegment:
             previous_segment = segment
 
         except Exception as e:
-            print(f"  ⚠ Error generating audio for segment: {e}")
-            # Add silence as placeholder
+            print(f"  Error generating audio for segment: {e}")
             combined += AudioSegment.silent(duration=1000)
 
     return combined
