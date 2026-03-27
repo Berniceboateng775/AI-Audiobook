@@ -24,7 +24,8 @@ def process_book(
     output_filename: str | None = None,
     model: str = "mistral",
     use_llm: bool = True,
-    output_format: str = "mp3"
+    output_format: str = "mp3",
+    progress_callback=None
 ) -> str:
     """
     Full pipeline: PDF → Cinematic Audiobook
@@ -35,54 +36,61 @@ def process_book(
         model: Ollama model for text analysis
         use_llm: Whether to use LLM for analysis (False = rule-based only)
         output_format: Output audio format ("mp3" or "wav")
+        progress_callback: Optional function(message: str) to report progress
         
     Returns:
         Path to the generated audiobook file
     """
     start_time = time.time()
 
+    def report(msg: str):
+        """Report progress to both console and callback."""
+        print(f"  {msg}")
+        if progress_callback:
+            progress_callback(msg)
+
     print("=" * 60)
     print("AI CINEMATIC AUDIOBOOK ENGINE (Local Mode)")
     print("=" * 60)
 
     # ── STEP 1: Extract PDF ──────────────────────────────────
-    print("\nSTEP 1: Extracting text from PDF...")
+    report("📄 Extracting text from PDF...")
     metadata = get_pdf_metadata(pdf_path)
     print(f"  Book: {metadata.get('title', 'Unknown')}")
     print(f"  Author: {metadata.get('author', 'Unknown')}")
     print(f"  Pages: {metadata.get('page_count', '?')}")
 
     raw_text = extract_text(pdf_path)
-    print(f"  Extracted {len(raw_text):,} characters")
+    report(f"📄 Extracted {len(raw_text):,} characters from PDF")
 
     # ── STEP 2: Clean Text ───────────────────────────────────
-    print("\nSTEP 2: Cleaning and structuring text...")
+    report("✂️ Cleaning and structuring text...")
     paragraphs = process_text(raw_text)
     total_sentences = sum(len(p["sentences"]) for p in paragraphs)
-    print(f"  Found {len(paragraphs)} paragraphs, {total_sentences} sentences")
+    report(f"✂️ Found {len(paragraphs)} paragraphs, {total_sentences} sentences")
 
     # ── STEP 3: Detect Dialogue ──────────────────────────────
-    print("\nSTEP 3: Detecting dialogue and narration...")
+    report("💬 Detecting dialogue and narration...")
     paragraphs = process_paragraphs(paragraphs)
     total_segments = sum(len(p["segments"]) for p in paragraphs)
     dialogue_count = sum(
         1 for p in paragraphs for s in p["segments"] if s["type"] == "dialogue"
     )
     narration_count = total_segments - dialogue_count
-    print(f"  {dialogue_count} dialogue segments, {narration_count} narration segments")
+    report(f"💬 {dialogue_count} dialogue + {narration_count} narration segments")
 
     # ── STEP 4: LLM Analysis (Ollama) ────────────────────────
     if use_llm:
-        print(f"\nSTEP 4: Analyzing characters & emotions (Ollama — {model})...")
+        report(f"🧠 Analyzing characters & emotions (Ollama — {model})...")
         if check_ollama_status():
             paragraphs = analyze_all_segments(paragraphs, model)
         else:
-            print("  Ollama not available — using rule-based analysis")
+            report("🧠 Ollama not available — using rule-based analysis")
             from app.llm_analyzer import apply_rule_based_analysis
             for p in paragraphs:
                 p["segments"] = [apply_rule_based_analysis(s) for s in p["segments"]]
     else:
-        print("\nSTEP 4: Using rule-based analysis (LLM disabled)...")
+        report("🧠 Using rule-based analysis (LLM disabled)...")
         from app.llm_analyzer import apply_rule_based_analysis
         for p in paragraphs:
             p["segments"] = [apply_rule_based_analysis(s) for s in p["segments"]]
@@ -93,27 +101,24 @@ def process_book(
         for s in p["segments"]:
             em = s.get("emotion", "neutral")
             emotions[em] = emotions.get(em, 0) + 1
+    report(f"🧠 Emotion breakdown: {emotions}")
 
-    print(f"  Emotion breakdown: {emotions}")
+    # Character summary
+    from app.llm_analyzer import get_character_registry
+    characters = get_character_registry()
+    if characters:
+        report(f"🧠 Discovered {len(characters)} characters: {', '.join(characters.keys())}")
 
     # ── STEP 4.5: Detect POV per paragraph ──────────────────
-    print("\nSTEP 4.5: Detecting narrator POV gender per paragraph...")
+    report("🎭 Detecting narrator POV gender per paragraph...")
     paragraphs = assign_pov_to_segments(paragraphs)
-    pov_counts = {"male": 0, "female": 0}
-    for p in paragraphs:
-        for s in p.get("segments", []):
-            pov = s.get("pov_gender", "male")
-            if pov in pov_counts:
-                pov_counts[pov] += 1
-    print(f"  POV distribution: {pov_counts}")
 
     # ── STEP 5 & 6: Generate Audio ──────────────────────────
-    print("\nSTEP 5: Generating voices (pyttsx3) and assembling audio...")
+    report("🎙️ Generating voices and assembling audio...")
 
     # Determine output path
     if output_filename is None:
         book_title = metadata.get("title", "audiobook")
-        # Clean filename
         safe_title = "".join(c if c.isalnum() or c in " -_" else "" for c in book_title)
         safe_title = safe_title.strip() or "audiobook"
         output_filename = f"{safe_title}.{output_format}"
@@ -126,6 +131,7 @@ def process_book(
 
     # ── DONE ─────────────────────────────────────────────────
     elapsed = time.time() - start_time
+    report(f"✅ Audiobook complete! ({elapsed:.1f}s)")
     print("\n" + "=" * 60)
     print("AUDIOBOOK GENERATION COMPLETE!")
     print(f"  File: {result_path}")

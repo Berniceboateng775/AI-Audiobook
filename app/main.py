@@ -83,20 +83,25 @@ async def upload_pdf(file: UploadFile = File(...)):
 
 def run_pipeline_job(job_id: str, pdf_path: str, output_filename: str):
     """Run the audiobook pipeline in a background thread."""
+    def update_progress(message: str):
+        """Callback to update job progress — this feeds the frontend."""
+        jobs[job_id]["progress"] = message
+
     try:
-        jobs[job_id]["progress"] = "Extracting text from PDF..."
+        update_progress("📄 Extracting text from PDF...")
         output_path = process_book(
             pdf_path=pdf_path,
-            output_filename=output_filename
+            output_filename=output_filename,
+            progress_callback=update_progress
         )
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["output_path"] = output_path
-        jobs[job_id]["progress"] = "Done!"
+        jobs[job_id]["progress"] = "✅ Done!"
 
     except Exception as e:
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error"] = str(e)
-        jobs[job_id]["progress"] = f"Error: {str(e)}"
+        jobs[job_id]["progress"] = f"❌ Error: {str(e)}"
         print(f"Job {job_id} failed: {e}")
 
 
