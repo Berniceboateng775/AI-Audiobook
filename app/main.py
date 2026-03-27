@@ -35,7 +35,7 @@ jobs: dict[str, dict] = {}
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     """Serve the upload page."""
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(name="index.html", request=request)
 
 
 @app.post("/upload")
