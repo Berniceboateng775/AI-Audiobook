@@ -67,6 +67,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         "progress": "Starting...",
         "logs": [],
         "started_at": time.time(),
+        "cancelled": False,
         "pdf_path": pdf_path,
         "pdf_name": file.filename,
         "output_filename": output_filename,
@@ -84,10 +85,19 @@ async def upload_pdf(file: UploadFile = File(...)):
     return {"job_id": job_id, "message": "Processing started!"}
 
 
+class JobCancelled(Exception):
+    """Raised when a job is cancelled by the user."""
+    pass
+
+
 def run_pipeline_job(job_id: str, pdf_path: str, output_filename: str):
     """Run the audiobook pipeline in a background thread."""
     def update_progress(message: str):
-        """Callback to update job progress — this feeds the frontend."""
+        """Callback to update job progress — also checks for cancellation."""
+        # Check if user cancelled
+        if jobs[job_id].get("cancelled"):
+            raise JobCancelled("Job cancelled by user")
+
         elapsed = time.time() - jobs[job_id]["started_at"]
         log_entry = f"[{elapsed:.1f}s] {message}"
         jobs[job_id]["progress"] = message
@@ -105,6 +115,12 @@ def run_pipeline_job(job_id: str, pdf_path: str, output_filename: str):
         jobs[job_id]["output_path"] = output_path
         jobs[job_id]["progress"] = "✅ Done!"
         jobs[job_id]["logs"].append(f"[{time.time() - jobs[job_id]['started_at']:.1f}s] ✅ Done!")
+
+    except JobCancelled:
+        jobs[job_id]["status"] = "cancelled"
+        jobs[job_id]["progress"] = "🚫 Cancelled"
+        jobs[job_id]["logs"].append("🚫 Cancelled by user")
+        print(f"Job {job_id} cancelled by user")
 
     except Exception as e:
         jobs[job_id]["status"] = "failed"
@@ -134,6 +150,23 @@ async def get_status(job_id: str):
         "pdf_name": job["pdf_name"],
         "error": job.get("error")
     }
+
+
+@app.post("/cancel/{job_id}")
+async def cancel_job(job_id: str):
+    """Cancel a running audiobook generation job."""
+    job = jobs.get(job_id)
+    if not job:
+        return JSONResponse(status_code=404, content={"error": "Job not found"})
+
+    if job["status"] != "processing":
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Job is {job['status']}, cannot cancel"}
+        )
+
+    job["cancelled"] = True
+    return {"message": "Cancel requested", "job_id": job_id}
 
 
 @app.get("/download/{job_id}")

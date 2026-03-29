@@ -459,6 +459,40 @@
             to { opacity: 1; transform: translateY(0); }
         }
 
+        /* Cancel Button */
+        .cancel-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 20px;
+            background: transparent;
+            color: var(--accent-red);
+            border: 1px solid rgba(239, 68, 68, 0.25);
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-family: 'Inter', sans-serif;
+            margin-top: 14px;
+        }
+
+        .cancel-btn:hover {
+            background: rgba(239, 68, 68, 0.1);
+            border-color: var(--accent-red);
+        }
+
+        .cancel-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .status-indicator.cancelled {
+            background: var(--accent-amber);
+            box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
+            animation: none;
+        }
+
         /* ── RESULT CARD ──────────────────────────── */
         .result-card {
             display: none;
@@ -679,6 +713,9 @@
             </div>
             <p class="progress-detail" id="progressDetail">Initializing pipeline...</p>
             <div class="activity-log" id="activityLog"></div>
+            <button class="cancel-btn" id="cancelBtn" onclick="cancelJob()">
+                ✕ Cancel Generation
+            </button>
         </div>
 
         <!-- Result Card -->
@@ -849,6 +886,9 @@
                 } else if (data.status === 'failed') {
                     clearInterval(statusInterval);
                     showError(data.error || 'Processing failed');
+                } else if (data.status === 'cancelled') {
+                    clearInterval(statusInterval);
+                    showCancelled();
                 }
             } catch (err) {
                 console.error('Status check failed:', err);
@@ -921,6 +961,31 @@
             document.getElementById('progressBar').style.width = '100%';
             document.getElementById('progressBar').style.background = 'var(--accent-red)';
             document.getElementById('progressBar').style.animation = 'none';
+            document.getElementById('cancelBtn').style.display = 'none';
+        }
+
+        async function cancelJob() {
+            if (!currentJobId) return;
+            const btn = document.getElementById('cancelBtn');
+            btn.disabled = true;
+            btn.textContent = 'Cancelling...';
+
+            try {
+                await fetch(`/cancel/${currentJobId}`, { method: 'POST' });
+            } catch (err) {
+                console.error('Cancel failed:', err);
+            }
+        }
+
+        function showCancelled() {
+            const statusDot = document.getElementById('statusDot');
+            statusDot.classList.add('cancelled');
+            document.getElementById('statusText').textContent = 'Cancelled';
+            document.getElementById('progressDetail').textContent = '🚫 Generation cancelled by user';
+            document.getElementById('progressBar').style.width = '100%';
+            document.getElementById('progressBar').style.background = 'var(--accent-amber)';
+            document.getElementById('progressBar').style.animation = 'none';
+            document.getElementById('cancelBtn').style.display = 'none';
         }
     </script>
 </body>
