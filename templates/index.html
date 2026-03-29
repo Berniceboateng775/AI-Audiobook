@@ -408,6 +408,57 @@
             color: var(--text-muted);
         }
 
+        .elapsed-time {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-left: auto;
+        }
+
+        /* Activity Log */
+        .activity-log {
+            margin-top: 14px;
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 10px;
+            padding: 12px 14px;
+            max-height: 180px;
+            overflow-y: auto;
+            scroll-behavior: smooth;
+        }
+
+        .activity-log::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .activity-log::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .activity-log::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 2px;
+        }
+
+        .log-entry {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--text-muted);
+            padding: 3px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+            animation: logFadeIn 0.3s ease;
+        }
+
+        .log-entry:last-child {
+            color: var(--text-secondary);
+            border-bottom: none;
+        }
+
+        @keyframes logFadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
         /* ── RESULT CARD ──────────────────────────── */
         .result-card {
             display: none;
@@ -621,11 +672,13 @@
             <div class="status-header">
                 <div class="status-indicator" id="statusDot"></div>
                 <span class="status-label" id="statusText">Processing...</span>
+                <span class="elapsed-time" id="elapsedTime">0.0s</span>
             </div>
             <div class="progress-track">
                 <div class="progress-bar" id="progressBar"></div>
             </div>
             <p class="progress-detail" id="progressDetail">Initializing pipeline...</p>
+            <div class="activity-log" id="activityLog"></div>
         </div>
 
         <!-- Result Card -->
@@ -766,6 +819,23 @@
 
                 const data = await response.json();
                 document.getElementById('progressDetail').textContent = data.progress;
+
+                // Update elapsed time
+                if (data.elapsed) {
+                    const mins = Math.floor(data.elapsed / 60);
+                    const secs = Math.floor(data.elapsed % 60);
+                    document.getElementById('elapsedTime').textContent = 
+                        mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+                }
+
+                // Update activity log
+                if (data.logs && data.logs.length > 0) {
+                    const logDiv = document.getElementById('activityLog');
+                    logDiv.innerHTML = data.logs.map(l => 
+                        `<div class="log-entry">${l}</div>`
+                    ).join('');
+                    logDiv.scrollTop = logDiv.scrollHeight;
+                }
 
                 // Update pipeline steps
                 updatePipelineSteps(data.progress);

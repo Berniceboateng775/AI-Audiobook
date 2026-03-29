@@ -5,6 +5,7 @@ Web interface for the AI Cinematic Audiobook Engine.
 
 import os
 import uuid
+import time
 import threading
 from fastapi import FastAPI, UploadFile, File, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -59,11 +60,13 @@ async def upload_pdf(file: UploadFile = File(...)):
         content = await file.read()
         f.write(content)
 
-    # Initialize job
+    # Initialize job with log history
     output_filename = f"{job_id}_audiobook.mp3"
     jobs[job_id] = {
         "status": "processing",
         "progress": "Starting...",
+        "logs": [],
+        "started_at": time.time(),
         "pdf_path": pdf_path,
         "pdf_name": file.filename,
         "output_filename": output_filename,
@@ -85,7 +88,11 @@ def run_pipeline_job(job_id: str, pdf_path: str, output_filename: str):
     """Run the audiobook pipeline in a background thread."""
     def update_progress(message: str):
         """Callback to update job progress — this feeds the frontend."""
+        elapsed = time.time() - jobs[job_id]["started_at"]
+        log_entry = f"[{elapsed:.1f}s] {message}"
         jobs[job_id]["progress"] = message
+        jobs[job_id]["logs"].append(log_entry)
+        print(f"  Job {job_id}: {log_entry}")
 
     try:
         update_progress("📄 Extracting text from PDF...")
@@ -97,12 +104,16 @@ def run_pipeline_job(job_id: str, pdf_path: str, output_filename: str):
         jobs[job_id]["status"] = "completed"
         jobs[job_id]["output_path"] = output_path
         jobs[job_id]["progress"] = "✅ Done!"
+        jobs[job_id]["logs"].append(f"[{time.time() - jobs[job_id]['started_at']:.1f}s] ✅ Done!")
 
     except Exception as e:
         jobs[job_id]["status"] = "failed"
         jobs[job_id]["error"] = str(e)
         jobs[job_id]["progress"] = f"❌ Error: {str(e)}"
+        jobs[job_id]["logs"].append(f"❌ Error: {str(e)}")
         print(f"Job {job_id} failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 @app.get("/status/{job_id}")
@@ -112,10 +123,14 @@ async def get_status(job_id: str):
     if not job:
         return JSONResponse(status_code=404, content={"error": "Job not found"})
 
+    elapsed = time.time() - job["started_at"]
+
     return {
         "job_id": job_id,
         "status": job["status"],
         "progress": job["progress"],
+        "logs": job.get("logs", []),
+        "elapsed": round(elapsed, 1),
         "pdf_name": job["pdf_name"],
         "error": job.get("error")
     }
