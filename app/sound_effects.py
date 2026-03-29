@@ -81,8 +81,47 @@ def get_available_sounds() -> list[str]:
 
 
 def get_background_sound(mood: str, duration_ms: int) -> AudioSegment | None:
-    """Get background sound for a scene mood, looped to required duration."""
-    sound_file = MOOD_SOUNDS.get(mood)
+    """
+    Get background sound for a scene mood, looped to required duration.
+    First checks Ollama's pre-analysis recommendations, then falls back
+    to the static MOOD_SOUNDS mapping.
+    """
+    sound_file = None
+
+    # ── Check Ollama's scene-sound recommendations first ──
+    try:
+        from app.llm_analyzer import get_book_context
+        book_ctx = get_book_context()
+        scene_sounds = book_ctx.get("scene_sounds", {})
+
+        # Map mood to scene_sounds keys
+        mood_to_scene = {
+            "romantic": "romantic_scenes",
+            "love": "romantic_scenes",
+            "intimate": "romantic_scenes",
+            "suspense": "tense_scenes",
+            "tense": "tense_scenes",
+            "dramatic": "dramatic_scenes",
+            "calm": "calm_scenes",
+            "peaceful": "calm_scenes",
+            "action": "action_scenes",
+            "humorous": "humorous_scenes",
+            "dark": "dark_scenes",
+            "eerie": "dark_scenes",
+        }
+
+        scene_key = mood_to_scene.get(mood, f"{mood}_scenes")
+        if scene_key in scene_sounds:
+            recommended = scene_sounds[scene_key]
+            rec_path = os.path.join(SOUNDS_DIR, recommended)
+            if os.path.exists(rec_path):
+                sound_file = recommended
+    except ImportError:
+        pass
+
+    # ── Fall back to static mapping ──
+    if sound_file is None:
+        sound_file = MOOD_SOUNDS.get(mood)
 
     if sound_file is None:
         return None
@@ -91,7 +130,7 @@ def get_background_sound(mood: str, duration_ms: int) -> AudioSegment | None:
 
     if not os.path.exists(sound_path):
         if sound_file not in _warned_sounds:
-            print(f"  Sound not found: {sound_file} (run: python generate_sounds.py)")
+            print(f"  Sound not found: {sound_file} (check sounds/ folder)")
             _warned_sounds.add(sound_file)
         return None
 

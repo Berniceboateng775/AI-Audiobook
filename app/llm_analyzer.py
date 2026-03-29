@@ -84,6 +84,11 @@ def get_character_registry() -> dict:
     return _character_registry.copy()
 
 
+def get_book_context() -> dict:
+    """Get the book context from pre-analysis (setting, mood, scene_sounds)."""
+    return _book_context.copy()
+
+
 def register_character(name: str, gender: str) -> dict:
     """
     Register a character and assign a unique voice ID.
@@ -131,42 +136,72 @@ def register_character(name: str, gender: str) -> dict:
 
 def pre_analyze_book(full_text: str, progress_callback=None) -> dict:
     """
-    Send the first portion of the book to Ollama to identify:
-    - All character names and genders
-    - The overall setting/mood
-    - Key themes
+    Send MULTIPLE excerpts (beginning, middle, end) of the book to Ollama to:
+    - Discover ALL characters and their genders
+    - Understand the overall setting/mood
+    - Map scenes to available background sounds
 
-    This runs BEFORE segment-by-segment analysis so we know
-    who all the characters are upfront.
+    This runs BEFORE segment-by-segment analysis.
     """
     global _book_context
 
     if progress_callback:
-        progress_callback("🔍 Pre-analyzing book to discover characters...")
+        progress_callback("🔍 Pre-analyzing book to discover characters & scenes...")
 
-    # Take first ~3000 chars (enough to establish characters)
-    excerpt = full_text[:3000]
+    # ── Sample from BEGINNING, MIDDLE, and END ──────────
+    text_len = len(full_text)
+    chunk_size = 2000
 
-    prompt = f"""Read this excerpt from a novel and identify ALL characters mentioned.
+    # Beginning (first 2000 chars)
+    beginning = full_text[:chunk_size]
 
-EXCERPT:
+    # Middle
+    mid_start = max(0, (text_len // 2) - (chunk_size // 2))
+    middle = full_text[mid_start:mid_start + chunk_size]
+
+    # End (last 2000 chars)
+    end = full_text[max(0, text_len - chunk_size):]
+
+    excerpt = f"""--- BEGINNING ---
+{beginning}
+
+--- MIDDLE ---
+{middle}
+
+--- END ---
+{end}"""
+
+    # Get available sound files for sound recommendation
+    from app.sound_effects import get_available_sounds
+    available_sounds = get_available_sounds()
+    sounds_list = ", ".join(available_sounds) if available_sounds else "none"
+
+    prompt = f"""Read these 3 excerpts from different parts of a novel and analyze the book.
+
 {excerpt}
+
+AVAILABLE BACKGROUND SOUNDS: {sounds_list}
 
 Return ONLY a JSON object with this exact format:
 {{
   "characters": [
-    {{"name": "FirstName", "gender": "male or female", "role": "brief description"}},
-    {{"name": "FirstName", "gender": "male or female", "role": "brief description"}}
+    {{"name": "FirstName", "gender": "male or female", "role": "brief role in story"}}
   ],
   "setting": "brief description of where/when the story takes place",
-  "mood": "one of: calm, romantic, dramatic, suspense, humorous, action"
+  "overall_mood": "one of: calm, romantic, dramatic, suspense, humorous, action",
+  "scene_sounds": {{
+    "romantic_scenes": "soft_piano.mp3",
+    "tense_scenes": "suspense_ambient.mp3",
+    "calm_scenes": "nature_ambient.mp3"
+  }}
 }}
 
 Rules:
-- List EVERY character mentioned, even minor ones
+- List EVERY character mentioned across all 3 excerpts, even minor ones
 - Use their FIRST NAME only (e.g. "Dante" not "Dante Russo")
-- Determine gender from context clues (pronouns, descriptions)
-- Include the narrator as a character ONLY if they are a named character
+- Determine gender from context clues (pronouns, descriptions, names)
+- For scene_sounds, pick from the AVAILABLE BACKGROUND SOUNDS list above
+- Map different emotional scene types to the most fitting sound file
 - Return ONLY valid JSON, no other text"""
 
     system = "You are a literary analysis assistant. Return ONLY valid JSON. Never include explanations."
@@ -196,7 +231,8 @@ Rules:
     _book_context = {
         "characters": {},
         "setting": data.get("setting", ""),
-        "mood": data.get("mood", "calm"),
+        "mood": data.get("overall_mood", data.get("mood", "calm")),
+        "scene_sounds": data.get("scene_sounds", {}),
     }
 
     for char in characters:
@@ -213,8 +249,18 @@ Rules:
         progress_callback(f"🔍 Found {len(_character_registry)} characters: {', '.join(names)}")
 
     print(f"  Pre-analysis: Setting = {data.get('setting', 'unknown')}")
-    print(f"  Pre-analysis: Mood = {data.get('mood', 'unknown')}")
+    print(f"  Pre-analysis: Mood = {_book_context['mood']}")
     print(f"  Pre-analysis: {len(_character_registry)} characters discovered")
+
+    # Log sound recommendations
+    scene_sounds = _book_context.get("scene_sounds", {})
+    if scene_sounds:
+        print(f"  Pre-analysis: Scene sounds recommended:")
+        for scene_type, sound_file in scene_sounds.items():
+            print(f"    • {scene_type} → {sound_file}")
+        if progress_callback:
+            sound_info = ", ".join(f"{k}={v}" for k, v in scene_sounds.items())
+            progress_callback(f"🎵 Sound mapping: {sound_info}")
 
     return _book_context
 
