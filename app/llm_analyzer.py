@@ -17,7 +17,7 @@ import requests
 # Ollama setup (local)
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral")
-OLLAMA_TIMEOUT = 120  # seconds — CPU-only Mistral needs more time
+OLLAMA_TIMEOUT = 300  # seconds — 5 min default for CPU-only Mistral batch analysis
 
 # Character registry — tracks all discovered characters across the book
 # Maps character name → {"gender": "male"/"female", "voice_id": int}
@@ -212,7 +212,7 @@ Rules:
 
     system = "You are a literary analysis assistant. Return ONLY valid JSON. Never include explanations."
 
-    result = _ollama_generate(prompt, system, timeout=180)
+    result = _ollama_generate(prompt, system, timeout=None)  # No timeout for pre-analysis
     if not result:
         print("  Pre-analysis: Ollama unavailable, will discover characters from text")
         return {}
@@ -463,11 +463,12 @@ def _extract_name_from_attribution(attribution: str) -> str:
 def _warmup_ollama():
     """
     Send a tiny prompt to force Ollama to load the model into RAM.
-    On CPU, Mistral takes ~40s to load. Better to wait here than
-    timeout during the real analysis.
+    NO TIMEOUT — if Ollama can't load the model, nothing else works,
+    so we wait however long it takes. On CPU with low RAM this can
+    take 2-5 minutes.
     """
     try:
-        print("  Ollama: Warming up model (loading into RAM)...")
+        print("  Ollama: Warming up model (loading into RAM — this may take a few minutes)...")
         resp = requests.post(
             f"{OLLAMA_URL}/api/generate",
             json={
@@ -476,14 +477,12 @@ def _warmup_ollama():
                 "stream": False,
                 "options": {"num_predict": 5}
             },
-            timeout=180  # Model loading can take 40-60s on CPU
+            timeout=None  # No timeout — wait as long as needed
         )
         if resp.status_code == 200:
             print("  Ollama: Model warm and ready!")
         else:
             print(f"  Ollama warmup: status {resp.status_code}")
-    except requests.exceptions.Timeout:
-        print("  Ollama warmup: timed out (model may still be loading)")
     except Exception as e:
         print(f"  Ollama warmup error: {e}")
 
