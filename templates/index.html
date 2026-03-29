@@ -966,15 +966,15 @@
 
         async function cancelJob() {
             if (!currentJobId) return;
-            const btn = document.getElementById('cancelBtn');
-            btn.disabled = true;
-            btn.textContent = 'Cancelling...';
 
-            try {
-                await fetch(`/cancel/${currentJobId}`, { method: 'POST' });
-            } catch (err) {
-                console.error('Cancel failed:', err);
-            }
+            // Stop polling immediately
+            if (statusInterval) clearInterval(statusInterval);
+
+            // Fire cancel request (don't wait for response)
+            fetch(`/cancel/${currentJobId}`, { method: 'POST' }).catch(() => {});
+
+            // Reload page immediately so user can upload a new PDF
+            window.location.reload();
         }
 
         function showCancelled() {

@@ -1,38 +1,34 @@
 """
 LLM Analyzer Module — Powered by Ollama (Mistral)
-Smart hybrid approach:
-1. PRE-ANALYSIS: Send book excerpt to Ollama to discover ALL characters upfront
-2. Rule-based analysis handles MOST segments (instant, free, no API)
-3. Ollama LLM used for remaining ambiguous dialogue
+Optimized for CPU-only machines: makes ONE single Ollama call to discover
+all characters, then uses fast rule-based analysis for everything else.
 
-Detects individual CHARACTER NAMES so each character gets a unique voice.
+Flow:
+1. ONE Ollama call → identifies all characters + genders + scene mood
+2. Rule-based → handles emotions, speaking styles, scene moods (instant)
 """
 
 import os
 import json
 import re
-import time
 import requests
 
 # Ollama setup (local)
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral")
-OLLAMA_TIMEOUT = 300  # seconds — 5 min default for CPU-only Mistral batch analysis
 
-# Character registry — tracks all discovered characters across the book
-# Maps character name → {"gender": "male"/"female", "voice_id": int}
+# Character registry — tracks all discovered characters
 _character_registry: dict[str, dict] = {}
 _male_count = 0
 _female_count = 0
 
-# Book context discovered during pre-analysis
+# Book context from Ollama
 _book_context: dict = {}
 
 # ══════════════════════════════════════════════════════════
-# NAMES THAT ARE NOT CHARACTERS (false positive blocklist)
+# FALSE-POSITIVE NAME BLOCKLIST
 # ══════════════════════════════════════════════════════════
 _NOT_NAMES = {
-    # Adverbs/adjectives that look capitalized in attribution
     "casually", "suddenly", "slowly", "quickly", "quietly", "loudly",
     "softly", "gently", "angrily", "sadly", "happily", "nervously",
     "anxiously", "finally", "desperately", "carefully", "roughly",
@@ -40,38 +36,28 @@ _NOT_NAMES = {
     "coldly", "calmly", "eagerly", "reluctantly", "stubbornly",
     "absently", "dreamily", "wearily", "tiredly", "playfully",
     "sarcastically", "drily", "dryly", "irritably", "impatiently",
-    # Not names
     "the", "that", "this", "then", "there", "they", "their", "them",
     "what", "when", "where", "which", "while", "who", "whom", "whose",
-    "with", "without", "would", "could", "should", "might", "maybe",
-    # Common non-name nouns that get capitalized at sentence start
     "someone", "something", "everyone", "everything", "anyone",
     "anything", "nobody", "nothing", "people", "person",
-    # Titles without names
     "the concierge", "the doctor", "the man", "the woman", "the girl",
-    "the boy", "the king", "the queen", "the prince", "the princess",
-    "the stranger", "the waiter", "the waitress", "the guard",
-    "the butler", "the maid", "the driver", "the captain",
+    "the boy", "the king", "the queen", "the stranger", "the waiter",
 }
 
 
 def _is_valid_name(name: str) -> bool:
-    """Check if a detected name is actually a character name."""
     if not name or len(name) < 2:
         return False
     if name.lower() in _NOT_NAMES:
         return False
-    # Must start with a letter
     if not name[0].isalpha():
         return False
-    # Filter out single common words
     if len(name.split()) == 1 and name.lower().endswith("ly"):
-        return False  # Adverbs
+        return False
     return True
 
 
 def reset_character_registry():
-    """Reset character tracking (call before each new book)."""
     global _character_registry, _male_count, _female_count, _book_context
     _character_registry = {}
     _male_count = 0
@@ -80,20 +66,14 @@ def reset_character_registry():
 
 
 def get_character_registry() -> dict:
-    """Get the current character registry."""
     return _character_registry.copy()
 
 
 def get_book_context() -> dict:
-    """Get the book context from pre-analysis (setting, mood, scene_sounds)."""
     return _book_context.copy()
 
 
 def register_character(name: str, gender: str) -> dict:
-    """
-    Register a character and assign a unique voice ID.
-    Returns the character's voice info.
-    """
     global _male_count, _female_count
 
     name = name.strip().title()
@@ -108,11 +88,11 @@ def register_character(name: str, gender: str) -> dict:
 
     gender = gender.lower()
     if gender not in ("male", "female"):
-        # Try to infer from book context
+        # Check book context
         if name in _book_context.get("characters", {}):
             gender = _book_context["characters"][name].get("gender", "male")
         else:
-            gender = "male"  # default
+            gender = "male"
 
     if gender == "male":
         _male_count += 1
@@ -131,93 +111,64 @@ def register_character(name: str, gender: str) -> dict:
 
 
 # ══════════════════════════════════════════════════════════
-# BOOK PRE-ANALYSIS — Send excerpt to Ollama to find characters
+# ONE OLLAMA CALL — discover characters + scene
 # ══════════════════════════════════════════════════════════
 
-def pre_analyze_book(full_text: str, progress_callback=None) -> dict:
+def discover_characters_with_ollama(full_text: str, progress_callback=None) -> dict:
     """
-    Send MULTIPLE excerpts (beginning, middle, end) of the book to Ollama to:
-    - Discover ALL characters and their genders
-    - Understand the overall setting/mood
-    - Map scenes to available background sounds
-
-    This runs BEFORE segment-by-segment analysis.
+    Make ONE single Ollama call with a SHORT prompt to identify characters.
+    Uses only the first 1500 chars of the book (enough for character intros).
     """
     global _book_context
 
     if progress_callback:
-        progress_callback("🔍 Warming up Ollama model...")
+        progress_callback("🔍 Asking Ollama to identify characters (1 call)...")
 
-    # ── Warm up the model first (forces Ollama to load it) ──
-    _warmup_ollama()
+    # Short excerpt — keep it small for fast CPU processing
+    excerpt = full_text[:1500]
 
-    if progress_callback:
-        progress_callback("🔍 Pre-analyzing book to discover characters & scenes...")
+    # Get available sounds
+    try:
+        from app.sound_effects import get_available_sounds
+        sounds = ", ".join(get_available_sounds())
+    except:
+        sounds = "soft_piano.mp3, nature_ambient.mp3, suspense_ambient.mp3"
 
-    # ── Sample from BEGINNING, MIDDLE, and END ──────────
-    text_len = len(full_text)
-    chunk_size = 1000  # Keep small for CPU-only Mistral
+    # VERY short, focused prompt — less tokens = faster response
+    prompt = f"""List the characters in this story excerpt. For each, give name and gender.
 
-    # Beginning (first 1000 chars)
-    beginning = full_text[:chunk_size]
+"{excerpt}"
 
-    # Middle
-    mid_start = max(0, (text_len // 2) - (chunk_size // 2))
-    middle = full_text[mid_start:mid_start + chunk_size]
+Sounds available: {sounds}
 
-    # End (last 1000 chars)
-    end = full_text[max(0, text_len - chunk_size):]
+Return JSON only:
+{{"characters":[{{"name":"FirstName","gender":"male/female"}}],"mood":"romantic/dramatic/calm/suspense/action","sounds":{{"romantic":"soft_piano.mp3","tense":"suspense_ambient.mp3"}}}}"""
 
-    excerpt = f"""--- BEGINNING ---
-{beginning}
-
---- MIDDLE ---
-{middle}
-
---- END ---
-{end}"""
-
-    # Get available sound files for sound recommendation
-    from app.sound_effects import get_available_sounds
-    available_sounds = get_available_sounds()
-    sounds_list = ", ".join(available_sounds) if available_sounds else "none"
-
-    prompt = f"""Read these 3 excerpts from different parts of a novel and analyze the book.
-
-{excerpt}
-
-AVAILABLE BACKGROUND SOUNDS: {sounds_list}
-
-Return ONLY a JSON object with this exact format:
-{{
-  "characters": [
-    {{"name": "FirstName", "gender": "male or female", "role": "brief role in story"}}
-  ],
-  "setting": "brief description of where/when the story takes place",
-  "overall_mood": "one of: calm, romantic, dramatic, suspense, humorous, action",
-  "scene_sounds": {{
-    "romantic_scenes": "soft_piano.mp3",
-    "tense_scenes": "suspense_ambient.mp3",
-    "calm_scenes": "nature_ambient.mp3"
-  }}
-}}
-
-Rules:
-- List EVERY character mentioned across all 3 excerpts, even minor ones
-- Use their FIRST NAME only (e.g. "Dante" not "Dante Russo")
-- Determine gender from context clues (pronouns, descriptions, names)
-- For scene_sounds, pick from the AVAILABLE BACKGROUND SOUNDS list above
-- Map different emotional scene types to the most fitting sound file
-- Return ONLY valid JSON, no other text"""
-
-    system = "You are a literary analysis assistant. Return ONLY valid JSON. Never include explanations."
-
-    result = _ollama_generate(prompt, system, timeout=None)  # No timeout for pre-analysis
-    if not result:
-        print("  Pre-analysis: Ollama unavailable, will discover characters from text")
+    try:
+        print("  Ollama: Sending character discovery request...")
+        resp = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "system": "Return ONLY valid JSON. No explanations.",
+                "stream": False,
+                "options": {
+                    "temperature": 0.1,
+                    "num_predict": 300,  # Short response needed
+                }
+            },
+            timeout=None  # No timeout
+        )
+        resp.raise_for_status()
+        result = resp.json().get("response", "")
+    except Exception as e:
+        print(f"  Ollama error: {e}")
+        if progress_callback:
+            progress_callback("🔍 Ollama unavailable — using rule-based analysis only")
         return {}
 
-    # Parse the response
+    # Parse response
     try:
         data = json.loads(result.strip())
     except json.JSONDecodeError:
@@ -226,61 +177,47 @@ Rules:
             try:
                 data = json.loads(match.group())
             except json.JSONDecodeError:
-                print("  Pre-analysis: Could not parse Ollama response")
+                print(f"  Could not parse Ollama response: {result[:200]}")
                 return {}
         else:
-            print("  Pre-analysis: Could not parse Ollama response")
+            print(f"  Could not parse Ollama response: {result[:200]}")
             return {}
 
-    # Register all discovered characters
-    characters = data.get("characters", [])
+    # Register characters
     _book_context = {
         "characters": {},
-        "setting": data.get("setting", ""),
-        "mood": data.get("overall_mood", data.get("mood", "calm")),
-        "scene_sounds": data.get("scene_sounds", {}),
+        "mood": data.get("mood", "calm"),
+        "scene_sounds": data.get("sounds", data.get("scene_sounds", {})),
     }
 
-    for char in characters:
+    for char in data.get("characters", []):
         name = char.get("name", "").strip().title()
         gender = char.get("gender", "unknown").lower()
-        role = char.get("role", "")
-
         if name and _is_valid_name(name) and name not in ("Narrator", "Unknown"):
-            _book_context["characters"][name] = {"gender": gender, "role": role}
+            _book_context["characters"][name] = {"gender": gender}
             register_character(name, gender)
 
     if progress_callback and _character_registry:
         names = [f"{n} ({v['gender']})" for n, v in _character_registry.items()]
         progress_callback(f"🔍 Found {len(_character_registry)} characters: {', '.join(names)}")
 
-    print(f"  Pre-analysis: Setting = {data.get('setting', 'unknown')}")
-    print(f"  Pre-analysis: Mood = {_book_context['mood']}")
-    print(f"  Pre-analysis: {len(_character_registry)} characters discovered")
-
-    # Log sound recommendations
+    # Log
+    print(f"  Ollama: Found {len(_character_registry)} characters")
+    print(f"  Mood: {_book_context['mood']}")
     scene_sounds = _book_context.get("scene_sounds", {})
     if scene_sounds:
-        print(f"  Pre-analysis: Scene sounds recommended:")
-        for scene_type, sound_file in scene_sounds.items():
-            print(f"    • {scene_type} → {sound_file}")
+        print(f"  Scene sounds: {scene_sounds}")
         if progress_callback:
-            sound_info = ", ".join(f"{k}={v}" for k, v in scene_sounds.items())
-            progress_callback(f"🎵 Sound mapping: {sound_info}")
+            progress_callback(f"🎵 Sound mapping: {scene_sounds}")
 
     return _book_context
 
 
 # ══════════════════════════════════════════════════════════
-# RULE-BASED ANALYSIS (PRIMARY — handles 90%+ of segments)
+# RULE-BASED ANALYSIS (handles ALL segments — instant)
 # ══════════════════════════════════════════════════════════
 
 def apply_rule_based_analysis(segment: dict) -> dict:
-    """
-    Comprehensive rule-based analysis — no API needed.
-    Handles emotion, speaking style, scene mood, and gender detection.
-    Also tries to extract character names from attribution tags.
-    """
     text = segment["text"].lower()
     original_text = segment.get("text", "")
     result = {
@@ -292,16 +229,14 @@ def apply_rule_based_analysis(segment: dict) -> dict:
         "speaking_style": "normal"
     }
 
-    # ── CHARACTER NAME EXTRACTION FROM ATTRIBUTION ────────
-    # Match patterns like: "said John", "Mary whispered", "cried Elizabeth"
+    # ── Character name from attribution ──
     attribution = segment.get("attribution", "")
     if attribution:
         name = _extract_name_from_attribution(attribution)
         if name:
             result["speaker_name"] = name
 
-    # ── MATCH AGAINST KNOWN CHARACTERS ───────────────────
-    # If no name from attribution, check if context mentions a known character
+    # ── Match known characters in nearby text ──
     if not result["speaker_name"] and segment.get("type") == "dialogue":
         nearby_text = (attribution + " " + original_text).lower()
         for char_name in _character_registry:
@@ -309,57 +244,45 @@ def apply_rule_based_analysis(segment: dict) -> dict:
                 result["speaker_name"] = char_name
                 break
 
-    # ── EMOTION DETECTION ────────────────────────────────
+    # ── Emotion detection ──
     emotion_rules = {
         "anger": {
-            "keywords": ["angry", "furious", "rage", "hate", "hated", "fury",
+            "keywords": ["angry", "furious", "rage", "hate", "fury",
                         "shouted", "yelled", "screamed", "slammed", "growled",
-                        "clenched", "seething", "livid", "snapped", "snarled"],
-            "mood": "dramatic",
-            "intensity": "high"
+                        "clenched", "seething", "snapped", "snarled"],
+            "mood": "dramatic", "intensity": "high"
         },
         "sadness": {
-            "keywords": ["sad", "cried", "tears", "sobbed", "grief", "mourning",
-                        "wept", "heartbroken", "ached", "pain", "lonely", "loss",
-                        "hurt", "broken", "miserable", "sorrow", "regret"],
-            "mood": "dramatic",
-            "intensity": "high"
+            "keywords": ["sad", "cried", "tears", "sobbed", "grief",
+                        "wept", "heartbroken", "ached", "pain", "lonely",
+                        "hurt", "broken", "miserable", "sorrow"],
+            "mood": "dramatic", "intensity": "high"
         },
         "love": {
-            "keywords": ["love", "loved", "kiss", "kissed", "embrace", "embraced",
+            "keywords": ["love", "loved", "kiss", "kissed", "embrace",
                         "heart", "darling", "tender", "caress", "passion",
-                        "desire", "beautiful", "gorgeous", "adore", "cherish",
-                        "gentle", "softly", "warm", "longing", "yearning"],
-            "mood": "romantic",
-            "intensity": "medium"
+                        "desire", "beautiful", "adore", "gentle", "warm"],
+            "mood": "romantic", "intensity": "medium"
         },
         "fear": {
             "keywords": ["afraid", "scared", "terrified", "trembled", "horror",
-                        "panic", "shook", "frozen", "dread", "nightmare",
-                        "shiver", "haunted", "danger", "threat", "alarmed"],
-            "mood": "suspense",
-            "intensity": "high"
+                        "panic", "shook", "frozen", "dread", "danger"],
+            "mood": "suspense", "intensity": "high"
         },
         "excitement": {
             "keywords": ["excited", "thrilled", "jumped", "laughed", "grinned",
-                        "amazing", "incredible", "wonderful", "smiled", "beamed",
-                        "delighted", "joy", "happy", "glow", "sparkle"],
-            "mood": "humorous",
-            "intensity": "medium"
+                        "amazing", "incredible", "smiled", "delighted", "joy"],
+            "mood": "humorous", "intensity": "medium"
         },
         "suspense": {
             "keywords": ["slowly", "crept", "shadow", "silence", "watched",
-                        "waited", "dark", "darkness", "quiet", "still",
-                        "carefully", "suddenly", "froze", "motionless", "tense"],
-            "mood": "suspense",
-            "intensity": "medium"
+                        "dark", "darkness", "quiet", "suddenly", "froze", "tense"],
+            "mood": "suspense", "intensity": "medium"
         },
         "humor": {
             "keywords": ["laughed", "chuckled", "grinned", "smirked", "funny",
-                        "ridiculous", "joke", "teased", "playful", "amused",
-                        "giggled", "snorted", "rolled eyes"],
-            "mood": "humorous",
-            "intensity": "low"
+                        "joke", "teased", "playful", "amused", "giggled"],
+            "mood": "humorous", "intensity": "low"
         }
     }
 
@@ -370,20 +293,14 @@ def apply_rule_based_analysis(segment: dict) -> dict:
             result["emotion_intensity"] = rules["intensity"]
             break
 
-    # ── SPEAKING STYLE DETECTION ─────────────────────────
+    # ── Speaking style ──
     style_rules = {
-        "whisper": ["whispered", "murmured", "breathed", "softly", "quietly",
-                    "hushed", "under her breath", "under his breath", "low voice"],
-        "shout": ["shouted", "yelled", "screamed", "bellowed", "roared",
-                 "demanded", "barked", "thundered", "exclaimed"],
-        "trembling": ["trembled", "shaking", "quivered", "stuttered",
-                     "voice broke", "voice cracked", "choked", "shakily"],
-        "sarcastic": ["sarcastically", "rolled her eyes", "rolled his eyes",
-                     "sneered", "mocked", "scoffed", "dryly", "deadpan"],
-        "seductive": ["purred", "sultry", "seductively", "husky", "velvety",
-                     "sensually", "teasing", "silky"],
-        "cold": ["coldly", "icily", "flatly", "emotionless", "detached",
-                "monotone", "blank", "stone-faced"]
+        "whisper": ["whispered", "murmured", "breathed", "softly", "quietly", "hushed"],
+        "shout": ["shouted", "yelled", "screamed", "bellowed", "roared", "demanded"],
+        "trembling": ["trembled", "shaking", "quivered", "stuttered", "voice cracked"],
+        "sarcastic": ["sarcastically", "rolled her eyes", "rolled his eyes", "sneered", "scoffed"],
+        "seductive": ["purred", "sultry", "seductively", "husky", "teasing"],
+        "cold": ["coldly", "icily", "flatly", "emotionless", "detached"]
     }
 
     for style, keywords in style_rules.items():
@@ -391,33 +308,28 @@ def apply_rule_based_analysis(segment: dict) -> dict:
             result["speaking_style"] = style
             break
 
-    # ── GENDER (from registry, attribution, or text clues) ──
+    # ── Gender from registry or text clues ──
     if result["speaker_name"] and result["speaker_name"] in _character_registry:
-        # Use known gender from registry
         result["speaker_gender"] = _character_registry[result["speaker_name"]]["gender"]
     elif result["speaker_gender"] in ("unknown", "narrator") and segment.get("type") == "dialogue":
         female_cues = ["she", "her ", "herself", "woman", "girl", "lady",
-                      "mother", "sister", "daughter", "queen", "princess",
-                      "mrs", "miss", "ms"]
+                      "mother", "sister", "daughter", "mrs", "miss"]
         male_cues = ["he ", "him ", "his ", "himself", "man ", "boy",
-                    "gentleman", "father", "brother", "son", "king", "prince",
-                    "mr ", "sir"]
-
+                    "father", "brother", "son", "mr ", "sir"]
         attr_text = (attribution + " " + text).lower()
-        female_score = sum(1 for w in female_cues if w in attr_text)
-        male_score = sum(1 for w in male_cues if w in attr_text)
-
-        if female_score > male_score:
+        f_score = sum(1 for w in female_cues if w in attr_text)
+        m_score = sum(1 for w in male_cues if w in attr_text)
+        if f_score > m_score:
             result["speaker_gender"] = "female"
-        elif male_score > female_score:
+        elif m_score > f_score:
             result["speaker_gender"] = "male"
 
-    # For narration type, always set to narrator
+    # Narration → narrator
     if segment.get("type") == "narration":
         result["speaker_gender"] = "narrator"
         result["speaker_name"] = "Narrator"
 
-    # Register the character if we found a valid name
+    # Register character
     if result["speaker_name"] and result["speaker_name"] not in ("Narrator", "Unknown", ""):
         char_info = register_character(result["speaker_name"], result["speaker_gender"])
         result["speaker_gender"] = char_info["gender"]
@@ -429,208 +341,26 @@ def apply_rule_based_analysis(segment: dict) -> dict:
 
 
 def _extract_name_from_attribution(attribution: str) -> str:
-    """Extract character name from attribution string, filtering false positives."""
     speech_verbs = (
         r'said|asked|replied|whispered|shouted|yelled|murmured|cried|'
         r'exclaimed|snapped|growled|snarled|laughed|screamed|demanded|'
         r'pleaded|begged|called|answered|continued|added|muttered|'
         r'breathed|sighed|groaned|hissed|roared|bellowed'
     )
-
-    # Pattern: "verb Name"
     name_match = re.search(
         rf'(?:{speech_verbs})\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',
         attribution, re.IGNORECASE
     )
     if not name_match:
-        # Pattern: "Name verb"
         name_match = re.search(
             rf'([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:{speech_verbs})',
             attribution
         )
-
     if name_match:
         name = name_match.group(1).strip()
         if _is_valid_name(name):
             return name
     return ""
-
-
-# ══════════════════════════════════════════════════════════
-# OLLAMA LLM ANALYSIS (for ambiguous segments)
-# ══════════════════════════════════════════════════════════
-
-def _warmup_ollama():
-    """
-    Send a tiny prompt to force Ollama to load the model into RAM.
-    NO TIMEOUT — if Ollama can't load the model, nothing else works,
-    so we wait however long it takes. On CPU with low RAM this can
-    take 2-5 minutes.
-    """
-    try:
-        print("  Ollama: Warming up model (loading into RAM — this may take a few minutes)...")
-        resp = requests.post(
-            f"{OLLAMA_URL}/api/generate",
-            json={
-                "model": OLLAMA_MODEL,
-                "prompt": "hi",
-                "stream": False,
-                "options": {"num_predict": 5}
-            },
-            timeout=None  # No timeout — wait as long as needed
-        )
-        if resp.status_code == 200:
-            print("  Ollama: Model warm and ready!")
-        else:
-            print(f"  Ollama warmup: status {resp.status_code}")
-    except Exception as e:
-        print(f"  Ollama warmup error: {e}")
-
-
-def _ollama_generate(prompt: str, system: str = "", timeout: int = None) -> str:
-    """Call Ollama's generate API with generous timeout for CPU."""
-    if timeout is None:
-        timeout = OLLAMA_TIMEOUT
-
-    try:
-        payload = {
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.1,
-                "num_predict": 500,
-            }
-        }
-        if system:
-            payload["system"] = system
-
-        resp = requests.post(
-            f"{OLLAMA_URL}/api/generate",
-            json=payload,
-            timeout=timeout
-        )
-        resp.raise_for_status()
-        return resp.json().get("response", "")
-    except requests.exceptions.Timeout:
-        print(f"  Ollama timeout ({timeout}s) — segment batch skipped")
-        return ""
-    except Exception as e:
-        print(f"  Ollama error: {e}")
-        return ""
-
-
-def analyze_with_llm(segments: list[dict], book_context: str = "") -> list[dict]:
-    """
-    Use Ollama (Mistral) for a batch of ambiguous segments.
-    Focuses on identifying CHARACTER NAMES and gender.
-    """
-    if not segments:
-        return []
-
-    segment_texts = []
-    for i, seg in enumerate(segments):
-        attr = seg.get("attribution", "")
-        text_preview = seg["text"][:200]
-        if attr:
-            segment_texts.append(f'{i}. Attribution: "{attr}" | Dialogue: "{text_preview}"')
-        else:
-            segment_texts.append(f'{i}. "{text_preview}"')
-
-    batch_text = "\n".join(segment_texts)
-
-    # Include known characters for context
-    known = []
-    for name, info in _character_registry.items():
-        known.append(f"{name} ({info['gender']})")
-    known_str = f"\nKnown characters: {', '.join(known)}" if known else ""
-
-    prompt = f"""Analyze these {len(segments)} dialogue segments from a novel.
-For each, identify the CHARACTER NAME of who is speaking, their gender, and the emotion.
-{known_str}
-
-{batch_text}
-
-Return ONLY a JSON array with exactly {len(segments)} objects:
-[{{"speaker_name":"CharacterName","speaker_gender":"male/female","emotion":"neutral/anger/sadness/love/fear/excitement/humor/suspense","speaking_style":"normal/whisper/shout/trembling/sarcastic/seductive/cold","scene_mood":"calm/romantic/dramatic/suspense/humorous/action"}}]
-
-Rules:
-- Use the character's actual FIRST NAME (e.g. "Dante", "Vivian"), not generic labels
-- If you can't determine the name, use "Unknown"
-- Use the known character list above to match speakers
-- Infer gender from the name and context clues
-- Return ONLY valid JSON, no other text"""
-
-    system = "You are a literary analysis assistant. Return ONLY valid JSON arrays. Never include explanations."
-
-    result_text = _ollama_generate(prompt, system)
-    if not result_text:
-        return [apply_rule_based_analysis(s) for s in segments]
-
-    analyses = parse_batch_response(result_text, len(segments))
-
-    enriched = []
-    for seg, analysis in zip(segments, analyses):
-        merged = {**seg, **analysis}
-
-        if "scene_mood" not in merged:
-            merged["scene_mood"] = "calm"
-        if "emotion_intensity" not in merged:
-            merged["emotion_intensity"] = "medium"
-
-        # Register discovered character
-        name = merged.get("speaker_name", "")
-        gender = merged.get("speaker_gender", "unknown")
-        if name and name not in ("Unknown", "Narrator", "None", "unknown") and _is_valid_name(name):
-            char_info = register_character(name, gender)
-            merged["speaker_gender"] = char_info["gender"]
-            merged["character_voice_id"] = char_info["voice_id"]
-        else:
-            merged["character_voice_id"] = 0
-
-        enriched.append(merged)
-    return enriched
-
-
-def parse_batch_response(response_text: str, expected_count: int) -> list[dict]:
-    """Parse JSON array from LLM response."""
-    text = response_text.strip()
-
-    # Try direct parse
-    try:
-        result = json.loads(text)
-        if isinstance(result, list):
-            while len(result) < expected_count:
-                result.append(get_defaults())
-            return result[:expected_count]
-    except json.JSONDecodeError:
-        pass
-
-    # Try extracting JSON array from text
-    match = re.search(r'\[.*\]', text, re.DOTALL)
-    if match:
-        try:
-            result = json.loads(match.group())
-            if isinstance(result, list):
-                while len(result) < expected_count:
-                    result.append(get_defaults())
-                return result[:expected_count]
-        except json.JSONDecodeError:
-            pass
-
-    return [get_defaults() for _ in range(expected_count)]
-
-
-def get_defaults() -> dict:
-    return {
-        "speaker_name": "Unknown",
-        "speaker_gender": "narrator",
-        "emotion": "neutral",
-        "emotion_intensity": "medium",
-        "scene_mood": "calm",
-        "speaking_style": "normal",
-        "character_voice_id": 0,
-    }
 
 
 # ══════════════════════════════════════════════════════════
@@ -644,84 +374,39 @@ def analyze_all_segments(
     progress_callback=None
 ) -> list[dict]:
     """
-    Smart hybrid analysis:
-    1. PRE-ANALYZE book to discover all characters upfront
-    2. Apply rule-based analysis to ALL segments (instant)
-    3. Send ONLY ambiguous dialogue to Ollama (saves resources)
+    Optimized analysis:
+    1. ONE Ollama call → discover characters (takes ~2 min on CPU)
+    2. Rule-based → analyze ALL segments (instant)
+    No batch segment analysis = no 20+ minute waits.
     """
     global OLLAMA_MODEL
     OLLAMA_MODEL = model
 
-    # Reset character registry for each new book
     reset_character_registry()
 
-    # ── Step 0: Book pre-analysis (discover characters) ──
-    if full_text and check_ollama_status():
-        pre_analyze_book(full_text, progress_callback)
-    elif not full_text:
-        # Reconstruct text from paragraphs
+    # ── Step 1: ONE Ollama call for characters ──
+    if full_text:
+        discover_characters_with_ollama(full_text, progress_callback)
+    else:
         all_text = "\n".join(p.get("text", "") for p in paragraphs)
-        if all_text and check_ollama_status():
-            pre_analyze_book(all_text, progress_callback)
+        if all_text:
+            discover_characters_with_ollama(all_text, progress_callback)
 
+    # ── Step 2: Rule-based analysis for ALL segments (instant) ──
     total = sum(len(p.get("segments", [])) for p in paragraphs)
     if progress_callback:
-        progress_callback(f"🧠 Analyzing {total} segments (rule-based first)...")
-    print(f"  Analyzing {total} segments (rule-based first)...")
+        progress_callback(f"🧠 Analyzing {total} segments (rule-based — instant)...")
+    print(f"  Analyzing {total} segments (rule-based)...")
 
-    # ── Step 1: Rule-based analysis for everything ───────
-    ambiguous = []
-
-    for p_idx, paragraph in enumerate(paragraphs):
+    for paragraph in paragraphs:
         for s_idx, segment in enumerate(paragraph.get("segments", [])):
-            enriched = apply_rule_based_analysis(segment)
-            paragraph["segments"][s_idx] = enriched
+            paragraph["segments"][s_idx] = apply_rule_based_analysis(segment)
 
-            # Track ambiguous dialogues for optional Ollama pass
-            if (enriched.get("type") == "dialogue" and
-                (enriched.get("speaker_name", "") in ("", "Unknown") or
-                 enriched.get("speaker_gender") in ("unknown", "narrator"))):
-                ambiguous.append((p_idx, s_idx))
-
-    print(f"  Rule-based: Done! ({total} segments analyzed instantly)")
-    print(f"  Characters found (rule-based): {len(_character_registry)}")
-    for name, info in _character_registry.items():
-        print(f"    • {name} ({info['gender']}, voice #{info['voice_id']})")
-    print(f"  Ambiguous dialogues needing LLM: {len(ambiguous)}")
-
-    if progress_callback:
-        char_list = ", ".join(f"{n} ({v['gender']})" for n, v in _character_registry.items())
-        progress_callback(f"🧠 Characters: {char_list or 'none yet'} | {len(ambiguous)} ambiguous segments")
-
-    # ── Step 2: Use Ollama only for ambiguous segments ───
-    if ambiguous and check_ollama_status():
-        if progress_callback:
-            progress_callback(f"🧠 Sending {len(ambiguous)} ambiguous segments to Ollama...")
-        print(f"  Sending {len(ambiguous)} ambiguous segments to Ollama ({OLLAMA_MODEL})...")
-
-        BATCH = 5  # Smaller batches for CPU-only (less timeout risk)
-        for i in range(0, len(ambiguous), BATCH):
-            batch_indices = ambiguous[i:i + BATCH]
-            batch_segments = [
-                paragraphs[p_idx]["segments"][s_idx]
-                for p_idx, s_idx in batch_indices
-            ]
-
-            enriched = analyze_with_llm(batch_segments)
-
-            for (p_idx, s_idx), seg in zip(batch_indices, enriched):
-                paragraphs[p_idx]["segments"][s_idx] = seg
-
-            done = min(i + BATCH, len(ambiguous))
-            print(f"  Ollama: {done}/{len(ambiguous)} ambiguous segments...")
-            if progress_callback:
-                progress_callback(f"🧠 Ollama: {done}/{len(ambiguous)} ambiguous segments analyzed...")
-
-    # Final character summary
+    # Summary
+    print(f"  Rule-based: Done! ({total} segments)")
     print(f"\n  === CHARACTER REGISTRY ({len(_character_registry)} characters) ===")
     for name, info in _character_registry.items():
         print(f"    {name}: {info['gender']} | voice #{info['voice_id']}")
-    print(f"  Done analyzing all {total} segments!")
 
     if progress_callback:
         char_summary = ", ".join(f"{n} ({v['gender']})" for n, v in _character_registry.items())
@@ -731,7 +416,6 @@ def analyze_all_segments(
 
 
 def check_ollama_status() -> bool:
-    """Check if Ollama is running locally."""
     try:
         resp = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
         resp.raise_for_status()
@@ -741,13 +425,8 @@ def check_ollama_status() -> bool:
             print(f"  Ollama: Connected! Model '{OLLAMA_MODEL}' ready.")
             return True
         else:
-            print(f"  Ollama: Connected but '{OLLAMA_MODEL}' not found.")
-            print(f"  Available models: {models}")
-            print(f"  Run: ollama pull {OLLAMA_MODEL}")
-            print(f"  Using rule-based analysis only (still works great!)")
+            print(f"  Ollama: '{OLLAMA_MODEL}' not found. Available: {models}")
             return False
     except Exception as e:
         print(f"  Ollama not running: {e}")
-        print(f"  Start it with: ollama serve")
-        print(f"  Using rule-based analysis only (still works great!)")
         return False
