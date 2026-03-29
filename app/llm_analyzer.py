@@ -146,20 +146,26 @@ def pre_analyze_book(full_text: str, progress_callback=None) -> dict:
     global _book_context
 
     if progress_callback:
+        progress_callback("🔍 Warming up Ollama model...")
+
+    # ── Warm up the model first (forces Ollama to load it) ──
+    _warmup_ollama()
+
+    if progress_callback:
         progress_callback("🔍 Pre-analyzing book to discover characters & scenes...")
 
     # ── Sample from BEGINNING, MIDDLE, and END ──────────
     text_len = len(full_text)
-    chunk_size = 2000
+    chunk_size = 1000  # Keep small for CPU-only Mistral
 
-    # Beginning (first 2000 chars)
+    # Beginning (first 1000 chars)
     beginning = full_text[:chunk_size]
 
     # Middle
     mid_start = max(0, (text_len // 2) - (chunk_size // 2))
     middle = full_text[mid_start:mid_start + chunk_size]
 
-    # End (last 2000 chars)
+    # End (last 1000 chars)
     end = full_text[max(0, text_len - chunk_size):]
 
     excerpt = f"""--- BEGINNING ---
@@ -206,7 +212,7 @@ Rules:
 
     system = "You are a literary analysis assistant. Return ONLY valid JSON. Never include explanations."
 
-    result = _ollama_generate(prompt, system)
+    result = _ollama_generate(prompt, system, timeout=180)
     if not result:
         print("  Pre-analysis: Ollama unavailable, will discover characters from text")
         return {}
@@ -454,8 +460,39 @@ def _extract_name_from_attribution(attribution: str) -> str:
 # OLLAMA LLM ANALYSIS (for ambiguous segments)
 # ══════════════════════════════════════════════════════════
 
-def _ollama_generate(prompt: str, system: str = "") -> str:
+def _warmup_ollama():
+    """
+    Send a tiny prompt to force Ollama to load the model into RAM.
+    On CPU, Mistral takes ~40s to load. Better to wait here than
+    timeout during the real analysis.
+    """
+    try:
+        print("  Ollama: Warming up model (loading into RAM)...")
+        resp = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": "hi",
+                "stream": False,
+                "options": {"num_predict": 5}
+            },
+            timeout=180  # Model loading can take 40-60s on CPU
+        )
+        if resp.status_code == 200:
+            print("  Ollama: Model warm and ready!")
+        else:
+            print(f"  Ollama warmup: status {resp.status_code}")
+    except requests.exceptions.Timeout:
+        print("  Ollama warmup: timed out (model may still be loading)")
+    except Exception as e:
+        print(f"  Ollama warmup error: {e}")
+
+
+def _ollama_generate(prompt: str, system: str = "", timeout: int = None) -> str:
     """Call Ollama's generate API with generous timeout for CPU."""
+    if timeout is None:
+        timeout = OLLAMA_TIMEOUT
+
     try:
         payload = {
             "model": OLLAMA_MODEL,
@@ -472,12 +509,12 @@ def _ollama_generate(prompt: str, system: str = "") -> str:
         resp = requests.post(
             f"{OLLAMA_URL}/api/generate",
             json=payload,
-            timeout=OLLAMA_TIMEOUT
+            timeout=timeout
         )
         resp.raise_for_status()
         return resp.json().get("response", "")
     except requests.exceptions.Timeout:
-        print(f"  Ollama timeout ({OLLAMA_TIMEOUT}s) — segment batch skipped")
+        print(f"  Ollama timeout ({timeout}s) — segment batch skipped")
         return ""
     except Exception as e:
         print(f"  Ollama error: {e}")
