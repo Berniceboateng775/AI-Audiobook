@@ -83,7 +83,11 @@ def process_book(
     if use_llm:
         report(f"🧠 Analyzing characters & emotions (Ollama — {model})...")
         if check_ollama_status():
-            paragraphs = analyze_all_segments(paragraphs, model)
+            paragraphs = analyze_all_segments(
+                paragraphs, model,
+                full_text=raw_text,
+                progress_callback=report
+            )
         else:
             report("🧠 Ollama not available — using rule-based analysis")
             from app.llm_analyzer import apply_rule_based_analysis
